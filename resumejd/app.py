@@ -761,14 +761,15 @@ elif page == "📐 Templates":
 
     from core.template_engine import TEMPLATES, check_content_fit, fill_template, get_template_gallery
 
-    resume_file = st.file_uploader("Upload your resume for formatting (PDF or DOCX)", type=["pdf", "docx"], key="tmpl_uploader")
-
     # Check for default resumes in resumejd/templates folder
     templates_dir = Path("resumejd/templates")
     default_resumes = []
     if templates_dir.exists():
         default_resumes = [f.name for f in templates_dir.iterdir() if f.suffix.lower() in [".pdf", ".docx"]]
 
+    # 1. Read source resume if already loaded or selected
+    resume_file = st.file_uploader("Upload your resume for formatting (PDF or DOCX)", type=["pdf", "docx"], key="tmpl_uploader")
+    
     selected_default = "-- Upload own resume --"
     if default_resumes:
         selected_default = st.selectbox("Or select a default resume from templates folder", ["-- Upload own resume --"] + default_resumes, key="tmpl_default_resume")
@@ -785,46 +786,61 @@ elif page == "📐 Templates":
         resume_text_to_format = parse_resume(resume_file)
         st.success(f"✓ Resume text loaded ({len(resume_text_to_format)} characters)")
 
-    if resume_text_to_format:
-        st.subheader("Select Layout Blueprint")
-        gallery = get_template_gallery()
-        cols = st.columns(len(gallery))
+    # 2. Render Template blueprint selection gallery unconditionally at the top
+    st.divider()
+    st.subheader("Select Layout Blueprint")
+    gallery = get_template_gallery()
+    cols = st.columns(len(gallery))
 
-        selected_template = st.session_state.get("selected_template", None)
+    selected_template = st.session_state.get("selected_template", None)
 
-        for i, tmpl in enumerate(gallery):
-            with cols[i]:
-                # Find matching preview image
-                img_path = None
-                if tmpl["id"] == "modern_minimal":
-                    img_path = "resumejd/templates/566w-KNZaNyT2LIQ.webp"
-                elif tmpl["id"] == "classic_two_col":
-                    img_path = "resumejd/templates/566w-NJMRbLSo17I.webp"
-                elif tmpl["id"] == "tech_focused":
-                    img_path = "resumejd/templates/566w-pl4Tp3Rqk2c.webp"
+    for i, tmpl in enumerate(gallery):
+        with cols[i]:
+            # Find matching preview image
+            img_path = None
+            if tmpl["id"] == "modern_minimal":
+                img_path = "resumejd/templates/566w-KNZaNyT2LIQ.webp"
+            elif tmpl["id"] == "classic_two_col":
+                img_path = "resumejd/templates/566w-NJMRbLSo17I.webp"
+            elif tmpl["id"] == "tech_focused":
+                img_path = "resumejd/templates/566w-pl4Tp3Rqk2c.webp"
 
-                if img_path and os.path.exists(img_path):
-                    st.image(img_path, caption=tmpl["name"], use_container_width=True)
+            if img_path and os.path.exists(img_path):
+                st.image(img_path, caption=tmpl["name"], use_container_width=True)
 
-                # Check fitting metrics
+            # Fit indicator
+            if resume_text_to_format:
                 fit_status = check_content_fit(resume_text_to_format, tmpl["id"])
                 fit_icon = "✅" if fit_status["fits"] else "⚠️"
+                fit_text = f"{fit_icon} {'Fits' if fit_status['fits'] else 'Overflow'}"
+            else:
+                fit_text = "❓ Awaiting Resume"
 
-                if st.button(
-                    f"{tmpl['emoji']} Select Layout\n{fit_icon} {'Fits' if fit_status['fits'] else 'Overflow'}",
-                    key=f"tmpl_{tmpl['id']}",
-                    use_container_width=True
-                ):
-                    st.session_state["selected_template"] = tmpl["id"]
-                    selected_template = tmpl["id"]
+            # Highlight if selected
+            is_active = (selected_template == tmpl["id"])
+            btn_label = "✨ Selected" if is_active else "Select Layout"
 
-                st.caption(f"{tmpl['pages']} page(s) · max {tmpl['capacity']} chars")
-                st.caption(tmpl["description"])
+            if st.button(
+                f"{tmpl['emoji']} {btn_label}\n({fit_text})",
+                key=f"tmpl_{tmpl['id']}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary"
+            ):
+                st.session_state["selected_template"] = tmpl["id"]
+                selected_template = tmpl["id"]
+                st.rerun()
 
-        if selected_template:
+            st.caption(f"{tmpl['pages']} page(s) · max {tmpl['capacity']} chars")
+            st.caption(tmpl["description"])
+
+    if selected_template:
+        st.divider()
+        st.subheader(f"Selected: {TEMPLATES[selected_template]['name']}")
+
+        if not resume_text_to_format:
+            st.info("💡 **Awaiting resume text:** Please upload a resume file or select a default resume above to fit and format your content!")
+        else:
             fit_status = check_content_fit(resume_text_to_format, selected_template)
-            st.divider()
-            st.subheader(f"Selected: {TEMPLATES[selected_template]['name']}")
 
             if fit_status["fits"]:
                 st.success(f"✅ {fit_status['message']}")
@@ -862,6 +878,7 @@ elif page == "📐 Templates":
                     "Switch to a larger capacity layout template",
                     "Compress my resume content to fit this layout"
                 ])
+
 
                 if action_opt == "Switch to a larger capacity layout template":
                     st.write("**Recommended templates with higher capacities:**")
