@@ -1,0 +1,3 @@
+libgbm1
+libxkbcommon0
+libasound2
