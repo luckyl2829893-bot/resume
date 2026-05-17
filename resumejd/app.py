@@ -206,7 +206,33 @@ if page == "🏠 Resume Tailorer":
         st.subheader("1. Upload Candidate Resume")
         resume_file = st.file_uploader("Select resume file (PDF or DOCX)", type=["pdf", "docx"], help="Your primary master resume file")
         
-        if resume_file:
+        # Check for default resumes in resumejd/templates folder
+        templates_dir = Path("resumejd/templates")
+        default_resumes = []
+        if templates_dir.exists():
+            default_resumes = [f.name for f in templates_dir.iterdir() if f.suffix.lower() in [".pdf", ".docx"]]
+        
+        selected_default = "-- Upload own resume --"
+        if default_resumes:
+            selected_default = st.selectbox("Or select a default resume from templates folder", ["-- Upload own resume --"] + default_resumes, key="tailor_default_resume")
+            
+        if selected_default != "-- Upload own resume --":
+            try:
+                default_file_path = templates_dir / selected_default
+                with open(default_file_path, "rb") as f:
+                    file_bytes = f.read()
+                st.session_state.resume_text = parse_resume(str(default_file_path))
+                if selected_default.lower().endswith(".pdf"):
+                    st.session_state.layout_profile = extract_layout_profile(file_bytes)
+                    accent_hex = st.session_state.layout_profile.get("accent_color_hex", "N/A")
+                    st.success(f"✓ Default resume loaded ({len(st.session_state.resume_text)} chars) | Accent: #{accent_hex}")
+                else:
+                    st.success(f"✓ Default resume loaded ({len(st.session_state.resume_text)} chars)")
+                with st.expander("Preview default resume text"):
+                    st.text(st.session_state.resume_text[:1000] + "...")
+            except Exception as e:
+                st.error(f"Failed to load default resume: {e}")
+        elif resume_file:
             try:
                 file_bytes = resume_file.read()
                 resume_file.seek(0)
@@ -737,10 +763,29 @@ elif page == "📐 Templates":
 
     resume_file = st.file_uploader("Upload your resume for formatting (PDF or DOCX)", type=["pdf", "docx"], key="tmpl_uploader")
 
-    if resume_file:
+    # Check for default resumes in resumejd/templates folder
+    templates_dir = Path("resumejd/templates")
+    default_resumes = []
+    if templates_dir.exists():
+        default_resumes = [f.name for f in templates_dir.iterdir() if f.suffix.lower() in [".pdf", ".docx"]]
+
+    selected_default = "-- Upload own resume --"
+    if default_resumes:
+        selected_default = st.selectbox("Or select a default resume from templates folder", ["-- Upload own resume --"] + default_resumes, key="tmpl_default_resume")
+
+    resume_text_to_format = None
+    if selected_default != "-- Upload own resume --":
+        try:
+            default_file_path = templates_dir / selected_default
+            resume_text_to_format = parse_resume(str(default_file_path))
+            st.success(f"✓ Default resume loaded ({len(resume_text_to_format)} characters)")
+        except Exception as e:
+            st.error(f"Failed to load default resume: {e}")
+    elif resume_file:
         resume_text_to_format = parse_resume(resume_file)
         st.success(f"✓ Resume text loaded ({len(resume_text_to_format)} characters)")
 
+    if resume_text_to_format:
         st.subheader("Select Layout Blueprint")
         gallery = get_template_gallery()
         cols = st.columns(len(gallery))
@@ -749,12 +794,24 @@ elif page == "📐 Templates":
 
         for i, tmpl in enumerate(gallery):
             with cols[i]:
+                # Find matching preview image
+                img_path = None
+                if tmpl["id"] == "modern_minimal":
+                    img_path = "resumejd/templates/566w-KNZaNyT2LIQ.webp"
+                elif tmpl["id"] == "classic_two_col":
+                    img_path = "resumejd/templates/566w-NJMRbLSo17I.webp"
+                elif tmpl["id"] == "tech_focused":
+                    img_path = "resumejd/templates/566w-pl4Tp3Rqk2c.webp"
+
+                if img_path and os.path.exists(img_path):
+                    st.image(img_path, caption=tmpl["name"], use_container_width=True)
+
                 # Check fitting metrics
                 fit_status = check_content_fit(resume_text_to_format, tmpl["id"])
                 fit_icon = "✅" if fit_status["fits"] else "⚠️"
 
                 if st.button(
-                    f"{tmpl['emoji']} {tmpl['name']}\n{fit_icon} {'Fits' if fit_status['fits'] else 'Overflow'}",
+                    f"{tmpl['emoji']} Select Layout\n{fit_icon} {'Fits' if fit_status['fits'] else 'Overflow'}",
                     key=f"tmpl_{tmpl['id']}",
                     use_container_width=True
                 ):
