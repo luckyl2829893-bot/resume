@@ -75,7 +75,7 @@ Resume text:
 {resume_text}
 """
     if router_instance is None:
-        raw_response = llm_router.generate(prompt)
+        raw_response = llm_router.generate(prompt, force_local=True)
     else:
         raw_response = router_instance.generate(prompt)
 
@@ -168,7 +168,7 @@ Return ONLY this JSON array with exactly {num_questions} items:
 ]
 """
     if router_instance is None:
-        raw_response = llm_router.generate(prompt)
+        raw_response = llm_router.generate(prompt, force_local=True)
     else:
         raw_response = router_instance.generate(prompt)
 

@@ -72,7 +72,7 @@ def generate_prep(resume_text: str, jd_dict: dict) -> dict:
         jd_json=json.dumps(jd_dict)
     )
     
-    raw_response = llm_router.generate(prompt)
+    raw_response = llm_router.generate(prompt, force_local=True)
     
     # Extract JSON robustly from conversational preambles/postambles
     json_str = ""
