@@ -179,9 +179,30 @@ Current tailored resume:
                 parsed["contact"] = l_strip.replace("**", "").replace("*", "").strip()
                 break
 
-    return format_tailored_output(
+    tailored_ordered = format_tailored_output(
         parsed["name"],
         parsed["contact"],
         parsed["sections"],
         section_order=section_order,
     )
+
+    # ── 5. Page Guard: Enforce Page Limits ──
+    from core.page_guard import enforce_page_limit
+    page_result = enforce_page_limit(resume_text, tailored_ordered)
+    final_text = page_result["final_text"]
+
+    # Re-score after compression if it was compressed
+    if page_result["was_compressed"]:
+        scores = score(final_text, jd_dict)
+
+    # If running in Streamlit, save page guard telemetry directly to session state
+    try:
+        import streamlit as st
+        st.session_state.page_info = page_result
+        if page_result["was_compressed"]:
+            st.session_state.tailored_score_dict = scores
+    except ImportError:
+        pass
+
+    return final_text
+

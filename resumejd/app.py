@@ -85,6 +85,9 @@ if "layout_profile" not in st.session_state:
     st.session_state.layout_profile = None
 if "model_choice" not in st.session_state:
     st.session_state.model_choice = "Auto (Gemini → Ollama fallback)"
+if "page_info" not in st.session_state:
+    st.session_state.page_info = None
+
 
 # --- SIDEBAR CONTROL PANEL ---
 # ── Ollama status check — cached 60s ─────────────────────────────────────────
@@ -103,12 +106,14 @@ with st.sidebar:
     st.caption("Privacy-First Local ATS Rewrite Workspace")
     st.divider()
 
-    # ── 4-screen navigation ────────────────────────────────────────────────
+    # ── 6-screen navigation ────────────────────────────────────────────────
     page = st.radio("Navigate Workspace", [
         "🏠 Resume Tailorer",
+        "📐 Templates",
         "📨 Cover Letter",
         "🎤 Interview Prep",
         "📊 Job Tracker",
+        "🧠 Skill Quiz",
     ])
     st.divider()
 
@@ -322,6 +327,18 @@ if page == "🏠 Resume Tailorer":
         m_col1.metric("Original Match Score", f"{orig_s}/100")
         m_col2.metric("Optimized Match Score", f"{tail_s}/100", delta=f"+{tail_s - orig_s:.1f}")
         m_col3.metric("ATS Match Tier Grade", st.session_state.tailored_score_dict.get("grade", "D"))
+
+        # ── Page Guard: Render 1-Page Enforcement Telemetry ──
+        if st.session_state.page_info:
+            p_info = st.session_state.page_info
+            st.write("📐 **Resume Length & Page Budget Enforcement**")
+            p_col1, p_col2, p_col3 = st.columns(3)
+            p_col1.metric("Original Resume Pages", f"{p_info.get('original_pages', 1.0)}")
+            p_col2.metric("Target Page Limit", f"{p_info.get('target_pages', 1.0)}")
+            p_col3.metric("Optimized Resume Pages", f"{p_info.get('final_pages', 1.0)}")
+            if p_info.get("was_compressed"):
+                st.info("📐 **Page Guard Enforced:** The generated resume was automatically compressed to stay strictly within your original page budget while preserving all achievements!")
+
         
         st.subheader("Match Criteria Breakdowns")
         break_col1, break_col2 = st.columns(2)
@@ -709,4 +726,264 @@ elif page == "📊 Job Tracker":
             _log_path = _P(f"agent/logs/{_dt.now().strftime('%Y-%m-%d')}.log")
             if _log_path.exists():
                 log_container.text_area("Agent Log", _log_path.read_text(encoding="utf-8"), height=300)
+
+
+# ── SCREEN 5: RESUME TEMPLATES ──
+elif page == "📐 Templates":
+    st.title("📐 Resume Layout Templates")
+    st.caption("Choose a professional layout blueprint. The system will fit your resume's optimized details automatically.")
+
+    from core.template_engine import TEMPLATES, check_content_fit, fill_template, get_template_gallery
+
+    resume_file = st.file_uploader("Upload your resume for formatting (PDF or DOCX)", type=["pdf", "docx"], key="tmpl_uploader")
+
+    if resume_file:
+        resume_text_to_format = parse_resume(resume_file)
+        st.success(f"✓ Resume text loaded ({len(resume_text_to_format)} characters)")
+
+        st.subheader("Select Layout Blueprint")
+        gallery = get_template_gallery()
+        cols = st.columns(len(gallery))
+
+        selected_template = st.session_state.get("selected_template", None)
+
+        for i, tmpl in enumerate(gallery):
+            with cols[i]:
+                # Check fitting metrics
+                fit_status = check_content_fit(resume_text_to_format, tmpl["id"])
+                fit_icon = "✅" if fit_status["fits"] else "⚠️"
+
+                if st.button(
+                    f"{tmpl['emoji']} {tmpl['name']}\n{fit_icon} {'Fits' if fit_status['fits'] else 'Overflow'}",
+                    key=f"tmpl_{tmpl['id']}",
+                    use_container_width=True
+                ):
+                    st.session_state["selected_template"] = tmpl["id"]
+                    selected_template = tmpl["id"]
+
+                st.caption(f"{tmpl['pages']} page(s) · max {tmpl['capacity']} chars")
+                st.caption(tmpl["description"])
+
+        if selected_template:
+            fit_status = check_content_fit(resume_text_to_format, selected_template)
+            st.divider()
+            st.subheader(f"Selected: {TEMPLATES[selected_template]['name']}")
+
+            if fit_status["fits"]:
+                st.success(f"✅ {fit_status['message']}")
+
+                if st.button("Apply Selected Template & Generate", type="primary"):
+                    with st.spinner("Re-formatting layout sections..."):
+                        res_fill = fill_template(resume_text_to_format, selected_template)
+
+                    if res_fill["success"]:
+                        st.subheader("Formatted Resume Output Preview")
+                        edited_formatted = st.text_area("Review Output Structure", res_fill["formatted_text"], height=450)
+
+                        c_dl1, c_dl2 = st.columns(2)
+                        with c_dl1:
+                            pdf_formatted = build_pdf(edited_formatted, {})
+                            st.download_button(
+                                "Download Formatted PDF",
+                                pdf_formatted,
+                                file_name=f"Formatted_{selected_template}.pdf",
+                                mime="application/pdf",
+                                use_container_width=True
+                            )
+                        with c_dl2:
+                            docx_formatted = build_docx(edited_formatted, {})
+                            st.download_button(
+                                "Download Formatted DOCX",
+                                docx_formatted,
+                                file_name=f"Formatted_{selected_template}.docx",
+                                use_container_width=True
+                            )
+            else:
+                st.warning(f"⚠️ {fit_status['message']}")
+
+                action_opt = st.radio("Choose resolution pathway:", [
+                    "Switch to a larger capacity layout template",
+                    "Compress my resume content to fit this layout"
+                ])
+
+                if action_opt == "Switch to a larger capacity layout template":
+                    st.write("**Recommended templates with higher capacities:**")
+                    if not fit_status["alternative_templates"]:
+                        st.info("No single-page layouts can hold this volume. Consider the 2-Page Executive template.")
+                    for alt in fit_status["alternative_templates"]:
+                        if st.button(
+                            f"{alt['emoji']} {alt['name']} — {alt['pages']} page(s) ({alt['headroom']} headroom chars)",
+                            key=f"alt_{alt['id']}"
+                        ):
+                            st.session_state["selected_template"] = alt["id"]
+                            st.rerun()
+
+                elif action_opt == "Compress my resume content to fit this layout":
+                    st.info(f"📐 Action will shorten content by approx {fit_status['overflow_chars']} characters. Preserves all key achievements and experiences.")
+                    if st.button("Compress and format", type="primary"):
+                        from core.page_guard import compress_to_budget
+                        target_budget = TEMPLATES[selected_template]["total_capacity"]
+                        with st.spinner("Compressing bullet point formulations..."):
+                            compressed_out = compress_to_budget(resume_text_to_format, target_budget)
+                        with st.spinner("Applying template blueprint..."):
+                            res_fill = fill_template(compressed_out, selected_template)
+
+                        if res_fill["success"]:
+                            st.success("✓ Successfully compressed content and formatted layout!")
+                            edited_formatted = st.text_area("Review Output Structure", res_fill["formatted_text"], height=450)
+                            pdf_formatted = build_pdf(edited_formatted, {})
+                            st.download_button(
+                                "Download Formatted PDF",
+                                pdf_formatted,
+                                file_name=f"Formatted_{selected_template}.pdf",
+                                mime="application/pdf",
+                                use_container_width=True
+                            )
+
+
+# ── SCREEN 6: SKILL KNOWLEDGE QUIZ ──
+elif page == "🧠 Skill Quiz":
+    st.title("🧠 Personal Skill & Tech Stack Quiz")
+    st.caption("Quiz yourself on skills extracted directly from your master resume. Anti-hallucination grounded technical prep.")
+
+    from core.skill_quiz import extract_resume_skills, generate_quiz_batch, score_quiz, get_resources_for_weak_skills
+
+    # Initialize states
+    if "quiz_state" not in st.session_state:
+        st.session_state.quiz_state = "setup"
+    if "quiz_questions" not in st.session_state:
+        st.session_state.quiz_questions = []
+    if "quiz_answers" not in st.session_state:
+        st.session_state.quiz_answers = {}
+    if "skills_profile" not in st.session_state:
+        st.session_state.skills_profile = None
+
+    # Setup / Config Phase
+    if st.session_state.quiz_state == "setup":
+        quiz_resume = st.file_uploader("Upload your resume to personalize a technical exam", type=["pdf", "docx"], key="quiz_uploader")
+
+        if quiz_resume:
+            quiz_text = parse_resume(quiz_resume)
+
+            if st.button("📊 Parse Skills Profile", type="primary"):
+                with st.spinner("Deconstructing resume skills and project stacks..."):
+                    st.session_state.skills_profile = extract_resume_skills(quiz_text)
+
+            if st.session_state.skills_profile:
+                profile = st.session_state.skills_profile
+                st.subheader("Skills and Context Identified:")
+
+                flat_skills = (
+                    profile.get("programming_languages", []) +
+                    profile.get("frameworks_libraries", []) +
+                    profile.get("tools_platforms", []) +
+                    profile.get("concepts", [])
+                )
+
+                q_col1, q_col2, q_col3 = st.columns(3)
+                q_col1.metric("Tech Skills", len(flat_skills))
+                q_col2.metric("Grounding Projects", len(profile.get("projects", [])))
+                q_col3.metric("Work Contexts", len(profile.get("internships_jobs", [])))
+
+                selected_focus = st.multiselect(
+                    "Choose topics to include in this exam:",
+                    options=flat_skills,
+                    default=flat_skills[:5] if len(flat_skills) >= 5 else flat_skills
+                )
+
+                num_questions = st.slider("Total MCQ Questions", 5, 25, 10)
+
+                if selected_focus and st.button("🚀 Generate Personalized Exam", type="primary"):
+                    with st.spinner("Synthesizing technical scenario questions... (takes 20-35s)"):
+                        questions_batch = generate_quiz_batch(profile, selected_focus, num_questions)
+
+                    if questions_batch:
+                        st.session_state.quiz_questions = questions_batch
+                        st.session_state.quiz_answers = {}
+                        st.session_state.quiz_state = "active"
+                        st.rerun()
+                    else:
+                        st.error("Failed to generate questions. Please retry.")
+
+    # Active Test Phase
+    elif st.session_state.quiz_state == "active":
+        qs = st.session_state.quiz_questions
+        ans = st.session_state.quiz_answers
+        total_q = len(qs)
+        answered_q = len(ans)
+
+        st.progress(answered_q / total_q if total_q > 0 else 0, f"Progress: {answered_q}/{total_q} answered")
+
+        with st.form("exam_form"):
+            for i, q in enumerate(qs):
+                st.markdown(f"**Q{i+1}. [{q.get('skill','?')}] — {q['question']}**")
+                options = q.get("options", {})
+                choice = st.radio(
+                    f"q_{i}",
+                    options=["A", "B", "C", "D"],
+                    format_func=lambda x, opts=options: f"{x}: {opts.get(x, '')}",
+                    key=f"q_{i}",
+                    label_visibility="collapsed"
+                )
+                st.markdown("---")
+
+            sub_quiz = st.form_submit_button("✅ Finish & Score Exam", type="primary", use_container_width=True)
+
+            if sub_quiz:
+                collected_answers = {}
+                for idx in range(total_q):
+                    key = f"q_{idx}"
+                    if key in st.session_state:
+                        collected_answers[idx] = st.session_state[key]
+                st.session_state.quiz_answers = collected_answers
+                st.session_state.quiz_results = score_quiz(qs, collected_answers)
+                st.session_state.quiz_state = "results"
+                st.rerun()
+
+    # Results Breakdown Phase
+    elif st.session_state.quiz_state == "results":
+        results = st.session_state.quiz_results
+        qs = st.session_state.quiz_questions
+
+        color_grade = {"A": "🟢", "B": "🟡", "C": "🟠", "D": "🔴"}
+        gr = results["overall_grade"]
+        st.markdown(f"## {color_grade.get(gr,'⚪')} Overall Score: {results['overall_pct']}% — Grade {gr}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Correct Answers", results["correct"])
+        c2.metric("Incorrect Answers", results["total_questions"] - results["correct"])
+        c3.metric("Total", results["total_questions"])
+
+        st.subheader("Domain Mastery Metrics Breakdown")
+        for skill, data in results["skill_results"].items():
+            g_icon = "✅" if data["score"] >= 80 else "⚠️" if data["score"] >= 50 else "❌"
+            st.write(f"{g_icon} **{skill}**: {data['score']}% ({data['correct']}/{data['total']}) — {data['grade']}")
+            st.progress(data["score"] / 100)
+
+        if results["wrong"]:
+            st.subheader("❌ Review Incorrect Answers")
+            for w in results["wrong"]:
+                with st.expander(f"[{w['skill']}] {w['question'][:80]}..."):
+                    st.error(f"Your selection: {w['your_answer']}")
+                    st.success(f"Correct answer: {w['correct_answer']}")
+                    st.info(f"Explanation: {w['explanation']}")
+
+        if results["weak_skills"]:
+            st.subheader("📺 Targeted Technical Reference Guides")
+            res_clips = get_resources_for_weak_skills(results["weak_skills"])
+            if res_clips:
+                for r in res_clips:
+                    with st.expander(f"[{r['skill']}] {r['title']} ({r['duration']})"):
+                        st.markdown(f"[▶️ Watch Guide on YouTube]({r['url']})")
+            else:
+                for skill in results["weak_skills"]:
+                    query = f"{skill}+advanced+concepts+interview+prep"
+                    st.markdown(f"🔍 [{skill} — Search advanced concepts on YouTube](https://www.youtube.com/results?search_query={query})")
+
+        if st.button("🔄 Personalize Another Exam", type="primary", use_container_width=True):
+            st.session_state.quiz_state = "setup"
+            st.session_state.quiz_questions = []
+            st.session_state.quiz_answers = {}
+            st.rerun()
+
 
