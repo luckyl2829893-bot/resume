@@ -1,0 +1,10 @@
+.env
+db/*.db
+agent/logs/
+__pycache__/
+*.pyc
+.venv/
+.davenv/
+*.pdf
+*.docx
+!templates/*.docx

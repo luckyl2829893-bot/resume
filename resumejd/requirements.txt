@@ -1,0 +1,14 @@
+streamlit
+google-generativeai
+python-docx
+pymupdf
+fpdf2
+sentence-transformers
+scikit-learn
+requests
+python-dotenv
+beautifulsoup4
+playwright>=1.44.0
+fake-useragent==1.5.1
+selenium-wire==5.1.0
+
