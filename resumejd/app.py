@@ -1,11 +1,11 @@
-import warnings
-# Silence verbose third-party warnings from transformers and python-docx
+import sys, os, warnings, logging, threading, queue, asyncio
+
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 import streamlit as st
-import os
-import sys
 import json
 from pathlib import Path
 from dotenv import load_dotenv
@@ -27,6 +27,70 @@ from db.tracker import log_experiment, get_experiments
 
 # Initialize tracking database on boot
 tracker.init_db()
+
+def get_active_resume(local_file=None):
+    """
+    Returns (resume_text, resume_bytes, layout_profile, source).
+    source is "local", "master", or "none".
+    Priority: local upload for this screen > master resume set in Tailorer.
+    """
+    if local_file is not None:
+        from core.resume_parser import parse_resume, extract_layout_profile
+        import io
+        raw = local_file.read()
+        if not raw:
+            return None, None, {}, "none"
+        text = parse_resume(io.BytesIO(raw))
+        layout = extract_layout_profile(raw)
+        return text, raw, layout, "local"
+
+    if st.session_state.get("master_resume_text"):
+        return (
+            st.session_state["master_resume_text"],
+            st.session_state.get("master_resume_bytes", b""),
+            st.session_state.get("master_layout_profile", {}),
+            "master"
+        )
+    return None, None, {}, "none"
+
+
+def resume_banner(source: str):
+    """Renders a consistent info/warning banner based on resume source."""
+    if source == "master":
+        st.info(
+            "Using resume uploaded in Resume Tailorer. "
+            "Upload a file above to override for this screen only.",
+            icon="📄"
+        )
+    elif source == "none":
+        st.warning(
+            "No resume found. Go to Resume Tailorer and upload "
+            "your master resume first.",
+            icon="⚠️"
+        )
+
+
+def ai_tutor_followup(question_context: str, key_prefix: str):
+    """Renders a text field and dynamic button to query the AI Tutor about any question."""
+    user_query = st.text_input("💬 Ask a follow-up question to the AI Tutor:", key=f"tutor_query_{key_prefix}")
+    if user_query:
+        if st.button("Ask AI Tutor 🚀", key=f"tutor_btn_{key_prefix}"):
+            with st.spinner("AI Tutor is formulating an answer..."):
+                prompt = f"""
+You are an expert technical interviewer and AI Tutor. 
+The user is asking a follow-up question regarding this technical context:
+---
+CONTEXT: {question_context}
+---
+USER'S FOLLOW-UP QUESTION: {user_query}
+
+Provide a precise, comprehensive, and senior staff engineer-level response explaining the concepts clearly. Include code snippets or best practices if applicable.
+"""
+                response = generate(prompt, api_key=st.session_state.get("byok_gemini_key"))
+                st.session_state[f"tutor_res_{key_prefix}"] = response
+        
+        if f"tutor_res_{key_prefix}" in st.session_state:
+            st.info(f"**🎓 AI Tutor Response:**\n\n{st.session_state[f'tutor_res_{key_prefix}']}")
 
 # --- Page Settings & Global Themes ---
 st.set_page_config(
@@ -90,16 +154,16 @@ if "page_info" not in st.session_state:
 
 
 # --- SIDEBAR CONTROL PANEL ---
-# ── Ollama status check — cached 60s ─────────────────────────────────────────
 @st.cache_data(ttl=60)
-def check_ollama_fast() -> bool:
+def check_ollama():
     try:
-        r = requests.get("http://localhost:11434/api/tags", timeout=2)
+        import requests as _req
+        r = _req.get("http://localhost:11434/api/tags", timeout=2)
         return r.status_code == 200
-    except Exception:
+    except:
         return False
 
-ollama_ok = check_ollama_fast()
+ollama_ok = check_ollama()
 
 with st.sidebar:
     st.title("📄 Resume AI")
@@ -144,47 +208,42 @@ with st.sidebar:
     else:
         st.markdown("**Active Engine:** Not run yet")
 
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    st.markdown(f"{'🟢' if ollama_ok else '🔴'} **Ollama:** {'Online' if ollama_ok else 'Offline'}")
-    st.markdown(f"{'🟢' if gemini_key else '🔴'} **Gemini Key:** {'Set' if gemini_key else 'Missing'}")
-    st.markdown("🟢 **MiniLM:** Loaded (CPU)")
+    st.markdown(
+        "🟢 **Ollama:** Online" if ollama_ok else "🔴 **Ollama:** Offline"
+    )
+    st.markdown(
+        "🟢 **Gemini Key:** Set" if (os.getenv("GEMINI_API_KEY") or st.session_state.get("byok_gemini_key")) else "🔴 **Gemini Key:** Missing"
+    )
     st.divider()
 
-    # ── ⚙️ System Config & MLOps Sidebar Expander ─────────────────────────
-    with st.expander("⚙️ Settings & MLOps"):
-        tab_cfg, tab_mlops = st.tabs(["Config", "MLOps Log"])
-        with tab_cfg:
-            st.caption("Gemini API Key")
-            gemini_key_status = os.getenv("GEMINI_API_KEY", "")
-            if gemini_key_status:
-                st.success("🔐 Gemini API key is configured (loaded from .env or Streamlit Secrets)")
-            else:
-                st.warning("Gemini key not found. Add it to your `.env` file:\n```\nGEMINI_API_KEY=your_key_here\n```\nOr set it in Streamlit Cloud → Settings → Secrets.")
+    with st.sidebar.expander("⚙ API Config"):
+        sys_key = os.getenv("GEMINI_API_KEY", "")
+        if sys_key:
+            st.success("System Gemini key: Active", icon="🔑")
+        else:
+            st.warning("No system key in .env", icon="⚠️")
 
-            st.caption("Ollama Status")
-            if st.button("Ping Ollama"):
-                health = check_ollama_status()
-                if health["running"]:
-                    st.success("Ollama Online!")
-                    st.caption(f"Installed: {', '.join(health['models'])}")
-                else:
-                    st.error("Ollama Offline")
+        st.divider()
+        st.caption("Use your own Gemini key (session only, never stored):")
+        user_key = st.text_input(
+            "Your Gemini API Key",
+            type="password",
+            key="byok_input",
+            placeholder="AIzaSy..."
+        )
+        if user_key:
+            st.session_state["byok_gemini_key"] = user_key
+            st.success("Your key is active this session", icon="✅")
+        elif st.session_state.get("byok_gemini_key"):
+            st.info("Session key loaded from earlier input")
 
-        with tab_mlops:
-            experiments = get_experiments(limit=15)
-            if not experiments:
-                st.caption("No runs logged yet.")
-            else:
-                for exp in experiments:
-                    delta = exp.get("score_delta", 0)
-                    with st.expander(f"{exp.get('company','?')[:10]} (+{delta:.0f})"):
-                        st.write(f"**Score:** {exp.get('tailored_score',0):.1f}")
-                        st.write(f"**Model:** {exp.get('model_used','?')}")
-                        if exp.get("missing_keywords"):
-                            st.caption(f"Gaps: {', '.join(exp['missing_keywords'][:3])}")
+        st.caption("[Get a free key →](https://aistudio.google.com/apikey)")
 
     st.divider()
-    st.caption("resumejd v2 — Local AI Resume Optimizer")
+    st.caption("resumejd v3 — Local AI Resume Optimizer")
+
+# Helper used everywhere a generate() call is made
+_api_key = st.session_state.get("byok_gemini_key") or None
 
 # ── SCREEN 1: RESUME TAILORER (MAIN ENGINE) ──
 if page == "🏠 Resume Tailorer":
@@ -219,6 +278,10 @@ if page == "🏠 Resume Tailorer":
                     st.success(f"✓ Default resume loaded ({len(st.session_state.resume_text)} chars) | Accent: #{accent_hex}")
                 else:
                     st.success(f"✓ Default resume loaded ({len(st.session_state.resume_text)} chars)")
+                # Store as global master resume for all other screens
+                st.session_state["master_resume_text"]    = st.session_state.resume_text
+                st.session_state["master_resume_bytes"]   = file_bytes
+                st.session_state["master_layout_profile"] = st.session_state.layout_profile or {}
                 with st.expander("Preview default resume text"):
                     st.text(st.session_state.resume_text[:1000] + "...")
             except Exception as e:
@@ -235,6 +298,10 @@ if page == "🏠 Resume Tailorer":
                     st.success(f"✓ Resume loaded ({len(st.session_state.resume_text)} chars) | Accent: #{accent_hex}")
                 else:
                     st.success(f"✓ Resume loaded ({len(st.session_state.resume_text)} chars)")
+                # Store as global master resume for all other screens
+                st.session_state["master_resume_text"]    = st.session_state.resume_text
+                st.session_state["master_resume_bytes"]   = file_bytes
+                st.session_state["master_layout_profile"] = st.session_state.layout_profile or {}
                 with st.expander("Preview extracted resume text"):
                     st.text(st.session_state.resume_text[:1000] + "...")
             except Exception as e:
@@ -271,7 +338,7 @@ if page == "🏠 Resume Tailorer":
     st.divider()
     
     # Process reframe trigger
-    if st.button("🚀 Tailor and Match Resume", type="primary", use_container_width=True):
+    if st.button("🚀 Tailor and Match Resume", type="primary", width='stretch'):
         if not st.session_state.resume_text:
             st.error("Please upload your master resume file first.")
         elif not st.session_state.raw_jd:
@@ -336,14 +403,22 @@ if page == "🏠 Resume Tailorer":
     if st.session_state.tailored_resume:
         st.subheader("📊 ATS Score Improvement Analysis")
         
-        # metric card rows
-        m_col1, m_col2, m_col3 = st.columns(3)
-        orig_s = st.session_state.original_score_dict.get("total_score", 0.0)
-        tail_s = st.session_state.tailored_score_dict.get("total_score", 0.0)
+        orig_s = st.session_state.original_score_dict.get("total_score", 0)
+        tail_s = st.session_state.tailored_score_dict.get("total_score", 0)
         
-        m_col1.metric("Original Match Score", f"{orig_s}/100")
-        m_col2.metric("Optimized Match Score", f"{tail_s}/100", delta=f"+{tail_s - orig_s:.1f}")
-        m_col3.metric("ATS Match Tier Grade", st.session_state.tailored_score_dict.get("grade", "D"))
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Original ATS Match", f"{orig_s}%")
+        c2.metric("Tailored ATS Match", f"{tail_s}%",
+                  delta=f"+{tail_s - orig_s}%" if tail_s > orig_s else "no change")
+        c3.metric("Target", "≥ 80%",
+                  delta="✓ Achieved" if tail_s >= 80 else "↑ Needs work")
+        
+        if tail_s == orig_s and orig_s >= 80:
+            st.success(
+                "Your resume was already well-optimized (≥80%). "
+                "Minor keyword refinements applied — no downgrade possible.",
+                icon="✅"
+            )
 
         # ── Page Guard: Render 1-Page Enforcement Telemetry ──
         if st.session_state.page_info:
@@ -398,7 +473,7 @@ if page == "🏠 Resume Tailorer":
                     data=pdf_bytes,
                     file_name=f"Resume_{st.session_state.company_name.replace(' ', '_')}.pdf",
                     mime="application/pdf",
-                    use_container_width=True
+                    width='stretch'
                 )
             except Exception as e:
                 st.error(f"PDF build crashed: {e}")
@@ -413,12 +488,12 @@ if page == "🏠 Resume Tailorer":
                     data=docx_bytes,
                     file_name=f"Resume_{st.session_state.company_name.replace(' ', '_')}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True
+                    width='stretch'
                 )
             except Exception as e:
                 st.error(f"DOCX build crashed: {e}")
         with dl_col3:
-            if st.button("💾 Save Application to Tracker", use_container_width=True):
+            if st.button("💾 Save Application to Tracker", width='stretch'):
                 tracker.add_application(
                     company=st.session_state.company_name,
                     role=st.session_state.role_title,
@@ -435,20 +510,31 @@ elif page == "\U0001f4e8 Cover Letter":
     st.title("\U0001f4e8 Cover Letter Generator")
     st.caption("Generate a high-converting, 3-paragraph tailored cover letter that matches your optimized resume highlights to the role's culture.")
 
-    if not st.session_state.tailored_resume or not st.session_state.raw_jd:
-        st.info("Please optimize your resume on the Tailorer screen first to pre-populate inputs automatically.")
-    else:
-        st.subheader("Tailor Cover Letter")
-        c_name = st.text_input("Confirm Company Name", st.session_state.company_name)
+    _local_cl = st.file_uploader(
+        "Upload resume (optional — overrides master resume)",
+        type="pdf", key="cover_letter_upload"
+    )
+    resume_text, resume_bytes, layout_profile, _src = get_active_resume(_local_cl)
+    resume_banner(_src)
+    if _src == "none":
+        st.stop()
 
-        if st.button("Generate Cover Letter", type="primary", use_container_width=True):
+    # Pre-populate JD or allow manual pasting
+    st.subheader("Tailor Cover Letter")
+    c_name = st.text_input("Confirm Company Name", st.session_state.company_name or "Target Company")
+    jd_raw_cl = st.text_area("Job Description for Cover Letter", st.session_state.raw_jd or "", height=150)
+
+    if st.button("Generate Cover Letter", type="primary", width='stretch'):
+        if not jd_raw_cl:
+            st.error("Please provide a Job Description to tailor the cover letter to.")
+        else:
             with st.spinner("Writing cover letter..."):
                 try:
-                    _mc = st.session_state.model_choice
                     cl_result = generate_cl(
-                        st.session_state.tailored_resume,
-                        st.session_state.raw_jd,
+                        resume_text,
+                        jd_raw_cl,
                         c_name,
+                        api_key=_api_key
                     )
                     st.session_state.cover_letter_text = cl_result
                     lm = get_last_model_used()
@@ -467,7 +553,7 @@ elif page == "\U0001f4e8 Cover Letter":
                 data=st.session_state.cover_letter_text,
                 file_name=f"Cover_Letter_{c_name.replace(' ', '_')}.txt",
                 mime="text/plain",
-                use_container_width=True,
+                width='stretch',
             )
 
 # ── SCREEN 3: INTERVIEW PREP ──
@@ -475,8 +561,16 @@ elif page == "\U0001f3a4 Interview Prep":
     st.title("\U0001f3a4 Custom Interview Preparation Kit")
     st.caption("Generate custom Behavioral questions, Technical questions, Smart follow-ups, and Red-flags tailored exactly to your resume context.")
 
+    _local_ip = st.file_uploader(
+        "Upload resume (optional — overrides master resume)",
+        type="pdf", key="interview_prep_upload"
+    )
+    resume_text, resume_bytes, layout_profile, _src = get_active_resume(_local_ip)
+    resume_banner(_src)
+    if _src == "none":
+        st.stop()
 
-    if not st.session_state.tailored_resume or not st.session_state.parsed_jd:
+    if not st.session_state.get("parsed_jd"):
         st.info("⚠️ Please optimize your resume on the Tailorer screen first to compile structural prep questions.")
     else:
         # Decide tab layout based on Ollama availability
@@ -489,10 +583,10 @@ elif page == "\U0001f3a4 Interview Prep":
             st.info("Start Ollama to unlock Deep Project Drill mode.", icon="🔬")
 
         with tab_std:
-            if st.button("Generate Interview Preparation Kit", type="primary", use_container_width=True):
+            if st.button("Generate Interview Preparation Kit", type="primary", width='stretch'):
                 with st.spinner("Analyzing role context and compiling prep kit..."):
                     try:
-                        prep_kit = generate_prep(st.session_state.tailored_resume, st.session_state.parsed_jd)
+                        prep_kit = generate_prep(resume_text, st.session_state.parsed_jd, api_key=_api_key)
                         st.session_state.prep_kit = prep_kit
                         st.success("✓ Prep Kit generated!")
                     except Exception as e:
@@ -527,81 +621,96 @@ elif page == "\U0001f3a4 Interview Prep":
             with tab_drill:
                 st.caption("Generates hyper-specific Q&A so you can explain every line of your code to a senior engineer.")
 
-                drill_resume = st.session_state.get("resume_text", "")
-                if not drill_resume:
-                    st.warning("Upload your resume on the Tailorer screen first.")
-                else:
-                    import re as _re
-                    # Primary: use parsed skills_profile projects if available
-                    project_names = []
-                    if st.session_state.get("skills_profile"):
-                        project_names = [
-                            p.get("name", "")
-                            for p in st.session_state.skills_profile.get("projects", [])
-                            if p.get("name")
-                        ]
-                    # Fallback 1: ##PROJECT: markers in text
-                    if not project_names:
-                        project_names = _re.findall(r"##PROJECT:\s*(.+)", drill_resume)
-                    # Fallback 2: smarter regex (skip common section headers)
-                    if not project_names:
-                        skip_words = {
-                            "EDUCATION", "EXPERIENCE", "SKILLS", "SUMMARY", "PROFILE",
-                            "CONTACT", "OBJECTIVE", "CERTIFICATIONS", "INTERESTS",
-                            "ACHIEVEMENTS", "PROJECTS", "WORK EXPERIENCE", "ABOUT"
+                import re as _re
+                # Primary: use parsed skills_profile projects if available
+                project_names = []
+                if st.session_state.get("skills_profile"):
+                    project_names = [
+                        p.get("name", "")
+                        for p in st.session_state.skills_profile.get("projects", [])
+                        if p.get("name")
+                    ]
+                # Fallback 1: ##PROJECT: markers in text
+                if not project_names:
+                    project_names = _re.findall(r"##PROJECT:\s*(.+)", resume_text)
+                # Fallback 2: smarter regex (skip common section headers)
+                if not project_names:
+                    skip_words = {
+                        "EDUCATION", "EXPERIENCE", "SKILLS", "SUMMARY", "PROFILE",
+                        "CONTACT", "OBJECTIVE", "CERTIFICATIONS", "INTERESTS",
+                        "ACHIEVEMENTS", "PROJECTS", "WORK EXPERIENCE", "ABOUT"
+                    }
+                    candidates = _re.findall(
+                        r"\n([A-Z][A-Za-z0-9][A-Za-z0-9 :&\-]{4,50})\n",
+                        resume_text
+                    )
+                    project_names = [c for c in candidates if c.strip().upper() not in skip_words][:8]
+                if not project_names:
+                    project_names = ["My Main Project"]
+
+                selected_project = st.selectbox("Select Project to Drill", project_names, key="drill_project")
+                quiz_mode = st.toggle("Quiz Me Mode (hide answers until revealed)", value=False, key="quiz_mode")
+
+                if st.button("Generate Deep Drill", type="primary", key="gen_drill"):
+                    with st.spinner(f"Ollama generating drill for '{selected_project}'... (1-3 min)"):
+                        drill = generate_deep_project_drill(resume_text, selected_project, "ollama", api_key=_api_key)
+                    st.session_state.drill_kit = drill
+
+                if "drill_kit" in st.session_state and st.session_state.drill_kit:
+                    drill = st.session_state.drill_kit
+                    if "error" in drill:
+                        st.error(drill["error"])
+                        if "raw" in drill:
+                            with st.expander("Raw LLM output"):
+                                st.code(drill["raw"])
+                    else:
+                        section_labels = {
+                            "architecture": "🏗 Architecture Deep Dive (WHY questions)",
+                            "internals": "🔧 Technology Internals (HOW it works)",
+                            "failure_modes": "💥 Failure Modes & Tradeoffs",
+                            "rapid_fire": "⚡ Rapid Fire — Prove You Built It",
+                            "concept_gaps": "🧠 Concept Gap Fillers",
                         }
-                        candidates = _re.findall(
-                            r"\n([A-Z][A-Za-z0-9][A-Za-z0-9 :&\-]{4,50})\n",
-                            drill_resume
-                        )
-                        project_names = [c for c in candidates if c.strip().upper() not in skip_words][:8]
-                    if not project_names:
-                        project_names = ["My Main Project"]
-
-                    selected_project = st.selectbox("Select Project to Drill", project_names, key="drill_project")
-                    quiz_mode = st.toggle("Quiz Me Mode (hide answers until revealed)", value=False, key="quiz_mode")
-
-                    if st.button("Generate Deep Drill", type="primary", key="gen_drill"):
-                        with st.spinner(f"Ollama generating drill for '{selected_project}'... (1-3 min)"):
-                            drill = generate_deep_project_drill(drill_resume, selected_project, "ollama")
-                        st.session_state.drill_kit = drill
-
-                    if "drill_kit" in st.session_state and st.session_state.drill_kit:
-                        drill = st.session_state.drill_kit
-                        if "error" in drill:
-                            st.error(drill["error"])
-                            if "raw" in drill:
-                                with st.expander("Raw LLM output"):
-                                    st.code(drill["raw"])
-                        else:
-                            section_labels = {
-                                "architecture": "🏗 Architecture Deep Dive (WHY questions)",
-                                "internals": "🔧 Technology Internals (HOW it works)",
-                                "failure_modes": "💥 Failure Modes & Tradeoffs",
-                                "rapid_fire": "⚡ Rapid Fire — Prove You Built It",
-                                "concept_gaps": "🧠 Concept Gap Fillers",
-                            }
-                            for key, label in section_labels.items():
-                                items = drill.get(key, [])
-                                if not items:
-                                    continue
-                                st.subheader(label)
-                                for idx, item in enumerate(items):
-                                    q_text = item.get("q", "")
-                                    with st.expander(f"Q{idx+1}: {q_text[:90]}{'...' if len(q_text)>90 else ''}"):
-                                        st.markdown(f"**Question:** {q_text}")
-                                        if "term" in item:
-                                            st.caption(f"Term detected in resume: `{item['term']}`")
-                                        if quiz_mode:
-                                            st.text_area("Your answer:", key=f"{key}_{idx}_ans", height=80)
-                                            if st.button("Reveal Answer ▼", key=f"{key}_{idx}_rev"):
-                                                st.markdown(f"**Model Answer:** {item.get('a', '')}")
-                                                if "follow_up" in item:
-                                                    st.info(f"**Senior follow-up:** {item['follow_up']}")
-                                        else:
-                                            st.markdown(f"**Answer:** {item.get('a', '')}")
+                        for key, label in section_labels.items():
+                            items = drill.get(key, [])
+                            if not items:
+                                continue
+                            st.subheader(label)
+                            for idx, item in enumerate(items):
+                                q_text = item.get("q", "")
+                                expander_key = f"{key}_{idx}"
+                                with st.expander(f"Q{idx+1}: {q_text[:90]}{'...' if len(q_text)>90 else ''}"):
+                                    st.markdown(f"**Question:** {q_text}")
+                                    if "term" in item:
+                                        st.caption(f"Term detected in resume: `{item['term']}`")
+                                    if quiz_mode:
+                                        st.text_area("Your answer:", key=f"{key}_{idx}_ans", height=80)
+                                        reveal_state_key = f"reveal_{key}_{idx}"
+                                        if reveal_state_key not in st.session_state:
+                                            st.session_state[reveal_state_key] = False
+                                            
+                                        c_btn1, c_btn2 = st.columns(2)
+                                        with c_btn1:
+                                            if st.button("Reveal Answer ▼", key=f"btn_{key}_{idx}_rev"):
+                                                st.session_state[reveal_state_key] = True
+                                                st.rerun()
+                                        with c_btn2:
+                                            if st.button("Hide Answer ▲", key=f"btn_{key}_{idx}_hide"):
+                                                st.session_state[reveal_state_key] = False
+                                                st.rerun()
+                                                
+                                        if st.session_state[reveal_state_key]:
+                                            st.markdown(f"**Model Answer:** {item.get('a', '')}")
                                             if "follow_up" in item:
                                                 st.info(f"**Senior follow-up:** {item['follow_up']}")
+                                    else:
+                                        st.markdown(f"**Answer:** {item.get('a', '')}")
+                                        if "follow_up" in item:
+                                            st.info(f"**Senior follow-up:** {item['follow_up']}")
+                                            
+                                    # Ask AI Tutor follow-up questions
+                                    st.divider()
+                                    ai_tutor_followup(f"Project: {selected_project}\nQuestion: {q_text}\nAnswer: {item.get('a', '')}", expander_key)
 
 # ── SCREEN 3: JOB TRACKER ──
 elif page == "📊 Job Tracker":
@@ -702,23 +811,25 @@ elif page == "📊 Job Tracker":
             max_delay = st.number_input("Max delay between apps (sec)", value=180, min_value=30)
 
         agent_resume_file = st.file_uploader(
-            "Upload Master Resume for Agent (PDF)",
+            "Upload Master Resume for Agent (PDF) (optional override)",
             type=["pdf"],
             key="agent_resume",
         )
+        agent_resume_text, agent_resume_bytes, agent_layout, _src = get_active_resume(agent_resume_file)
+        resume_banner(_src)
+        if _src == "none":
+            st.stop()
 
         stats_container = st.empty()
         log_container = st.empty()
 
-        can_start = bool(job_title_agent and agent_resume_file)
+        can_start = bool(job_title_agent and agent_resume_text)
         if st.button("🚀 Start Agent", type="primary", disabled=not can_start):
             from datetime import datetime as _dt
             import asyncio as _asyncio
-
-            resume_bytes_agent = agent_resume_file.read()
-            agent_resume_file.seek(0)
-            agent_resume_text = parse_resume(agent_resume_file)
-            agent_layout = extract_layout_profile(resume_bytes_agent)
+            import threading
+            import queue
+            import time
 
             agent_config = {
                 "job_title": job_title_agent,
@@ -733,35 +844,96 @@ elif page == "📊 Job Tracker":
                 },
             }
 
-            _stats = {"discovered": 0, "applied": 0}
+            event_queue = queue.Queue()
 
+            # Progress collector callback
             def _progress(event_type, count):
-                _stats[event_type] = count
-                stats_container.markdown(
-                    f"**Discovered:** {_stats['discovered']} &nbsp;|&nbsp; "
-                    f"**{'Applied' if not dry_run else 'Processed'}:** {_stats['applied']}"
-                )
+                event_queue.put((event_type, count))
 
-            try:
-                from agent.job_applicant_agent import run_agent
-                with st.spinner("Agent running — do not close this tab..."):
-                    result = _asyncio.run(run_agent(agent_config, agent_resume_text, agent_layout, _progress))
+            # Thread worker
+            def agent_thread_worker(config, resume_text, layout, q):
+                # Set Windows loop policy inside thread to avoid Selector loop issues
+                if sys.platform == "win32":
+                    try:
+                        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+                    except:
+                        pass
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    from agent.job_applicant_agent import run_agent
+                    res = loop.run_until_complete(
+                        run_agent(config, resume_text, layout, _progress)
+                    )
+                    q.put(("done", res))
+                except Exception as e:
+                    q.put(("error", e))
+                finally:
+                    loop.close()
 
-                st.success(
-                    f"Agent complete! Discovered **{result['discovered']}** jobs. "
-                    f"{'Applied' if not dry_run else 'Dry-run processed'}: **{result['applied']}**. "
-                    f"Check the Application Board tab."
-                )
-            except ImportError:
-                st.error("Playwright not installed. Run: `pip install playwright && playwright install chromium`")
-            except Exception as _ae:
-                st.error(f"Agent error: {_ae}")
+            # Start thread
+            t = threading.Thread(
+                target=agent_thread_worker,
+                args=(agent_config, agent_resume_text, agent_layout, event_queue),
+                daemon=True
+            )
+            t.start()
 
-            # Show today's log
-            from pathlib import Path as _P
-            _log_path = _P(f"agent/logs/{_dt.now().strftime('%Y-%m-%d')}.log")
-            if _log_path.exists():
-                log_container.text_area("Agent Log", _log_path.read_text(encoding="utf-8"), height=300)
+            # Live updates
+            _stats = {"discovered": 0, "applied": 0}
+            
+            with st.spinner("Agent running in background thread — do not close this tab..."):
+                while t.is_alive() or not event_queue.empty():
+                    try:
+                        event = event_queue.get_nowait()
+                        if event[0] == "done":
+                            result = event[1]
+                            st.success(
+                                f"Agent complete! Discovered **{result.get('discovered', 0)}** jobs. "
+                                f"{'Applied' if not dry_run else 'Dry-run processed'}: **{result.get('applied', 0)}**. "
+                                f"Check the Application Board tab."
+                            )
+                            break
+                        elif event[0] == "error":
+                            st.error(f"Agent error in background thread: {event[1]}")
+                            break
+                        else:
+                            _stats[event[0]] = event[1]
+                            stats_container.markdown(
+                                f"**Discovered:** {_stats['discovered']} &nbsp;|&nbsp; "
+                                f"**{'Applied' if not dry_run else 'Processed'}:** {_stats['applied']}"
+                            )
+                    except queue.Empty:
+                        pass
+
+                    # Show today's log live
+                    _log_path = Path(f"agent/logs/{_dt.now().strftime('%Y-%m-%d')}.log")
+                    if _log_path.exists():
+                        log_container.text_area("Agent Log", _log_path.read_text(encoding="utf-8"), height=300)
+                    
+                    time.sleep(0.5)
+
+        # Show today's static log if not running
+        from datetime import datetime as _dt
+        _log_path = Path(f"agent/logs/{_dt.now().strftime('%Y-%m-%d')}.log")
+        if _log_path.exists():
+            log_container.text_area("Agent Log", _log_path.read_text(encoding="utf-8"), height=300)
+
+        st.divider()
+        with st.expander("ℹ️ Honest Limitations & Anti-Bot Spoofing capabilities"):
+            st.markdown("""
+            ### 🤖 Automated Job Applications & Anti-Bot Spoofing Guard
+            Autonomous agents face several fundamental technical boundaries. Our local agent uses state-of-the-art Playwright stealth plugins to mirror human behavior:
+            
+            1. **Browser Fingerprint Masking:** Playwright overrides variables like `navigator.webdriver` to bypass simple script detectors.
+            2. **Human-like Pacing:** Typings are simulated character-by-character with randomized delays (50ms - 150ms).
+            3. **Custom Headers & Locale:** Web page headers are dynamically configured with standard Indian regional configurations to match localized applicant telemetry.
+            
+            **Limitations:**
+            * High-security captchas (e.g., Cloudflare Turnstile, hCaptcha) still require human bypass actions.
+            * Dynamic application forms with nested iframe selectors may fail; in this scenario, the agent logs a screenshot of the form page for your manual review.
+            """)
 
 
 # ── SCREEN 5: RESUME TEMPLATES ──
@@ -777,24 +949,30 @@ elif page == "📐 Templates":
     if templates_dir.exists():
         default_resumes = [f.name for f in templates_dir.iterdir() if f.suffix.lower() in [".pdf", ".docx"]]
 
-    # 1. Read source resume if already loaded or selected
-    resume_file = st.file_uploader("Upload your resume for formatting (PDF or DOCX)", type=["pdf", "docx"], key="tmpl_uploader")
-    
     selected_default = "-- Upload own resume --"
     if default_resumes:
         selected_default = st.selectbox("Or select a default resume from templates folder", ["-- Upload own resume --"] + default_resumes, key="tmpl_default_resume")
 
-    resume_text_to_format = None
+    resume_file = st.file_uploader("Upload your resume for formatting (PDF or DOCX) (optional override)", type=["pdf", "docx"], key="tmpl_uploader")
+    
+    # Use global active resume pattern
     if selected_default != "-- Upload own resume --":
         try:
             default_file_path = templates_dir / selected_default
+            with open(default_file_path, "rb") as f:
+                raw_bytes = f.read()
             resume_text_to_format = parse_resume(str(default_file_path))
+            layout_profile = extract_layout_profile(raw_bytes) if selected_default.lower().endswith(".pdf") else {}
+            _src = "local"
             st.success(f"✓ Default resume loaded ({len(resume_text_to_format)} characters)")
         except Exception as e:
             st.error(f"Failed to load default resume: {e}")
-    elif resume_file:
-        resume_text_to_format = parse_resume(resume_file)
-        st.success(f"✓ Resume text loaded ({len(resume_text_to_format)} characters)")
+            resume_text_to_format, _, layout_profile, _src = None, None, {}, "none"
+    else:
+        resume_text_to_format, _, layout_profile, _src = get_active_resume(resume_file)
+        resume_banner(_src)
+        if _src == "none":
+            st.stop()
 
     # 2. Render Template blueprint selection gallery unconditionally at the top
     st.divider()
@@ -816,7 +994,7 @@ elif page == "📐 Templates":
                 img_path = "resumejd/templates/566w-pl4Tp3Rqk2c.webp"
 
             if img_path and os.path.exists(img_path):
-                st.image(img_path, caption=tmpl["name"], use_container_width=True)
+                st.image(img_path, caption=tmpl["name"], width='stretch')
 
             # Fit indicator
             if resume_text_to_format:
@@ -833,7 +1011,7 @@ elif page == "📐 Templates":
             if st.button(
                 f"{tmpl['emoji']} {btn_label}\n({fit_text})",
                 key=f"tmpl_{tmpl['id']}",
-                use_container_width=True,
+                width='stretch',
                 type="primary" if is_active else "secondary"
             ):
                 st.session_state["selected_template"] = tmpl["id"]
@@ -871,7 +1049,7 @@ elif page == "📐 Templates":
                                 pdf_formatted,
                                 file_name=f"Formatted_{selected_template}.pdf",
                                 mime="application/pdf",
-                                use_container_width=True
+                                width='stretch'
                             )
                         with c_dl2:
                             docx_formatted = build_docx(edited_formatted, {})
@@ -879,7 +1057,7 @@ elif page == "📐 Templates":
                                 "Download Formatted DOCX",
                                 docx_formatted,
                                 file_name=f"Formatted_{selected_template}.docx",
-                                use_container_width=True
+                                width='stretch'
                             )
             else:
                 st.warning(f"⚠️ {fit_status['message']}")
@@ -921,7 +1099,7 @@ elif page == "📐 Templates":
                                 pdf_formatted,
                                 file_name=f"Formatted_{selected_template}.pdf",
                                 mime="application/pdf",
-                                use_container_width=True
+                                width='stretch'
                             )
 
 
@@ -944,67 +1122,69 @@ elif page == "🧠 Skill Quiz":
 
     # Setup / Config Phase
     if st.session_state.quiz_state == "setup":
-        # Reuse resume already in session if available
-        if st.session_state.resume_text:
-            quiz_text = st.session_state.resume_text
-            st.info(f"📄 Using resume already uploaded in this session ({len(quiz_text)} chars). You can upload a different one below to override.")
-            quiz_resume_override = st.file_uploader("Upload a different resume (optional)", type=["pdf", "docx"], key="quiz_uploader")
-            if quiz_resume_override:
-                quiz_text = parse_resume(quiz_resume_override)
-                st.session_state.resume_text = quiz_text
-                st.success(f"✓ New resume loaded ({len(quiz_text)} chars)")
-        else:
-            quiz_resume = st.file_uploader("Upload your resume to personalize a technical exam", type=["pdf", "docx"], key="quiz_uploader")
-            quiz_text = ""
-            if quiz_resume:
-                quiz_text = parse_resume(quiz_resume)
-                st.session_state.resume_text = quiz_text
+        _local_q = st.file_uploader(
+            "Upload resume (optional — overrides master resume)",
+            type=["pdf", "docx"], key="quiz_uploader"
+        )
+        resume_text, resume_bytes, layout_profile, _src = get_active_resume(_local_q)
+        resume_banner(_src)
+        if _src == "none":
+            st.stop()
 
-        if st.session_state.resume_text:
-            quiz_text = st.session_state.resume_text
+        if st.button("Parse Skills Profile", type="primary"):
+            with st.spinner("Scanning every line of your resume for skills..."):
+                try:
+                    st.session_state.skills_profile = extract_resume_skills(resume_text, api_key=_api_key)
+                except RuntimeError as e:
+                    st.error(f"Could not extract skills: {e}")
+                    st.info("Make sure Ollama is running (`ollama serve`) or check your Gemini API key in the sidebar.")
+                    st.session_state.skills_profile = None
 
-            if st.button("Parse Skills Profile", type="primary"):
-                with st.spinner("Scanning every line of your resume for skills..."):
-                    st.session_state.skills_profile = extract_resume_skills(quiz_text)
+        if st.session_state.skills_profile:
+            profile = st.session_state.skills_profile
+            st.subheader("Skills and Context Identified:")
 
-            if st.session_state.skills_profile:
-                profile = st.session_state.skills_profile
-                st.subheader("Skills and Context Identified:")
-
-                # Use all_skills comprehensive list as the primary selector source
-                all_skills = profile.get("all_skills", [])
-                if not all_skills:
-                    all_skills = (
-                        profile.get("programming_languages", []) +
-                        profile.get("frameworks_libraries", []) +
-                        profile.get("tools_platforms", []) +
-                        profile.get("concepts", [])
-                    )
-
-                q_col1, q_col2, q_col3 = st.columns(3)
-                q_col1.metric("Total Skills Found", len(all_skills))
-                q_col2.metric("Grounding Projects", len(profile.get("projects", [])))
-                q_col3.metric("Work Contexts", len(profile.get("internships_jobs", [])))
-
-                selected_focus = st.multiselect(
-                    "Choose topics to include in this exam:",
-                    options=all_skills,
-                    default=all_skills[:6] if len(all_skills) >= 6 else all_skills
+            # Use all_skills comprehensive list as the primary selector source
+            all_skills = profile.get("all_skills", [])
+            if not all_skills:
+                all_skills = (
+                    profile.get("programming_languages", []) +
+                    profile.get("frameworks_libraries", []) +
+                    profile.get("tools_platforms", []) +
+                    profile.get("concepts", [])
                 )
 
-                num_questions = st.slider("Total MCQ Questions", 5, 25, 10)
+            q_col1, q_col2, q_col3 = st.columns(3)
+            q_col1.metric("Total Skills Found", len(all_skills))
+            q_col2.metric("Grounding Projects", len(profile.get("projects", [])))
+            q_col3.metric("Work Contexts", len(profile.get("internships_jobs", [])))
 
-                if selected_focus and st.button("Generate Personalized Exam", type="primary"):
-                    with st.spinner("Synthesizing technical scenario questions... (takes 20-35s)"):
-                        questions_batch = generate_quiz_batch(profile, selected_focus, num_questions)
+            selected_focus = st.multiselect(
+                "Choose topics to include in this exam:",
+                options=all_skills,
+                default=all_skills[:6] if len(all_skills) >= 6 else all_skills
+            )
 
-                    if questions_batch:
-                        st.session_state.quiz_questions = questions_batch
-                        st.session_state.quiz_answers = {}
-                        st.session_state.quiz_state = "active"
-                        st.rerun()
-                    else:
-                        st.error("Failed to generate questions. Please retry.")
+            num_questions = st.slider("Total MCQ Questions", 5, 25, 10)
+            
+            if not _api_key:
+                st.info("💡 **Gemini Free BYOK notice:** Requests over 10 questions without a Gemini API Key will fall back to local Ollama. Start Ollama or enter a Gemini key in the sidebar to bypass.")
+
+            if selected_focus and st.button("Generate Personalized Exam", type="primary"):
+                with st.spinner("Generating personalized exam questions..."):
+                    try:
+                        questions_batch = generate_quiz_batch(profile, selected_focus, num_questions, api_key=_api_key)
+                    except RuntimeError as e:
+                        st.error(f"Question generation failed: {e}")
+                        questions_batch = []
+
+                if questions_batch:
+                    st.session_state.quiz_questions = questions_batch
+                    st.session_state.quiz_answers = {}
+                    st.session_state.quiz_state = "active"
+                    st.rerun()
+                else:
+                    st.error("Failed to generate questions. Please retry.")
 
     # Active Test Phase
     elif st.session_state.quiz_state == "active":
@@ -1028,7 +1208,7 @@ elif page == "🧠 Skill Quiz":
                 )
                 st.markdown("---")
 
-            sub_quiz = st.form_submit_button("✅ Finish & Score Exam", type="primary", use_container_width=True)
+            sub_quiz = st.form_submit_button("✅ Finish & Score Exam", type="primary", width='stretch')
 
             if sub_quiz:
                 collected_answers = {}
@@ -1061,13 +1241,34 @@ elif page == "🧠 Skill Quiz":
             st.write(f"{g_icon} **{skill}**: {data['score']}% ({data['correct']}/{data['total']}) — {data['grade']}")
             st.progress(data["score"] / 100)
 
-        if results["wrong"]:
-            st.subheader("❌ Review Incorrect Answers")
-            for w in results["wrong"]:
-                with st.expander(f"[{w['skill']}] {w['question'][:80]}..."):
-                    st.error(f"Your selection: {w['your_answer']}")
-                    st.success(f"Correct answer: {w['correct_answer']}")
-                    st.info(f"Explanation: {w['explanation']}")
+        st.divider()
+        st.subheader("📝 Complete Question-by-Question Review")
+        for idx, q in enumerate(qs):
+            user_ans = st.session_state.quiz_answers.get(idx)
+            correct_ans = q["correct"]
+            is_correct = (user_ans == correct_ans)
+            
+            badge = "✅ Correct" if is_correct else "❌ Incorrect"
+            expander_title = f"Q{idx+1} [{q.get('skill', 'General')}] — {badge} — {q['question'][:70]}..."
+            
+            with st.expander(expander_title):
+                st.markdown(f"**Question:** {q['question']}")
+                
+                # Show options
+                options = q.get("options", {})
+                for opt, opt_val in options.items():
+                    if opt == correct_ans:
+                        st.markdown(f"🟢 **{opt}: {opt_val}** (Correct Answer)")
+                    elif opt == user_ans:
+                        st.markdown(f"🔴 **{opt}: {opt_val}** (Your Answer)")
+                    else:
+                        st.markdown(f"⚪ {opt}: {opt_val}")
+                
+                st.info(f"**Explanation:** {q.get('explanation', 'No explanation available.')}")
+                
+                # Ask follow-up question
+                st.divider()
+                ai_tutor_followup(f"Skill: {q.get('skill', 'General')}\nQuestion: {q['question']}\nCorrect Option: {correct_ans}\nUser Selected: {user_ans}\nExplanation: {q.get('explanation', '')}", f"quiz_{idx}")
 
         if results["weak_skills"]:
             st.subheader("📺 Targeted Technical Reference Guides")
@@ -1081,7 +1282,7 @@ elif page == "🧠 Skill Quiz":
                     query = f"{skill}+advanced+concepts+interview+prep"
                     st.markdown(f"🔍 [{skill} — Search advanced concepts on YouTube](https://www.youtube.com/results?search_query={query})")
 
-        if st.button("🔄 Personalize Another Exam", type="primary", use_container_width=True):
+        if st.button("🔄 Personalize Another Exam", type="primary", width='stretch'):
             st.session_state.quiz_state = "setup"
             st.session_state.quiz_questions = []
             st.session_state.quiz_answers = {}

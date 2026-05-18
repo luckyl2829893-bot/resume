@@ -2,15 +2,12 @@
 core/skill_quiz.py
 
 Resume-grounded skill quiz generator and test runner.
-
 Anti-hallucination strategy:
 - Extract skills/tools/projects ONLY from the resume text.
-- Each question batch (20-30 Qs) is generated from a specific skill scope.
 - Questions include the skill name + project/context from the resume as grounding.
-- LLM is instructed to generate questions a person could only answer if they
-  ACTUALLY worked with that technology — not surface-level definitions.
-- All correct answers are stored and verified at generation time.
-- After test: score by skill domain + recommend YouTube clips for weak areas.
+- Returns scenario-based MCQs.
+- Free Gemini tier cap: 10 questions.
+- 11+ questions: routes to Ollama if available, else caps at 10 and flags needs_ollama.
 """
 
 import json
@@ -35,8 +32,8 @@ Rules:
 6. Include a one-line explanation for the correct answer.
 7. Return ONLY valid JSON — no markdown, no preamble."""
 
-
-def extract_resume_skills(resume_text: str, router_instance=None) -> dict:
+GEMINI_CAP = 10  # safe per-call limit for Gemini free tier
+def extract_resume_skills(resume_text: str, router_instance=None, api_key: str = None) -> dict:
     """
     Parse resume and extract structured skill/project/tool profile.
     Uses an exhaustive prompt to catch every technical term in the resume,
@@ -46,9 +43,9 @@ def extract_resume_skills(resume_text: str, router_instance=None) -> dict:
 Read this resume carefully — every single line, every bullet point, every project description.
 Extract ALL technical skills, tools, frameworks, libraries, platforms, and technologies you can find.
 Do not skip anything mentioned in passing or in context sentences.
-
+ 
 Return ONLY JSON in this exact format (no markdown, no preamble):
-
+ 
 {{
   "programming_languages": ["Python", "JavaScript", "C++"],
   "frameworks_libraries": ["FastAPI", "React", "YOLOv11", "Transformers"],
@@ -88,9 +85,13 @@ Resume text to analyze:
 {resume_text}
 """
     if router_instance is None:
-        raw_response = llm_router.generate(prompt, force_local=True)
+        raw_response = llm_router.generate(prompt, force_local=True, api_key=api_key)
     else:
         raw_response = router_instance.generate(prompt)
+
+    # Detect router-level errors (Ollama offline, empty response, etc.)
+    if not raw_response or not raw_response.strip() or raw_response.startswith("ERROR:"):
+        raise RuntimeError(raw_response or "LLM returned an empty response. Check that Ollama is running.")
 
     # Clean markdown fences
     text = raw_response.strip()
@@ -128,7 +129,7 @@ Resume text to analyze:
 
 
 def generate_quiz_batch(
-    skills_profile: dict, focus_skills: list, num_questions: int, router_instance=None
+    skills_profile: dict, focus_skills: list, num_questions: int, router_instance=None, api_key: str = None
 ) -> list:
     """
     Generate a batch of MCQ questions grounded in the candidate's resume.
@@ -190,9 +191,13 @@ Return ONLY this JSON array with exactly {num_questions} items:
 ]
 """
     if router_instance is None:
-        raw_response = llm_router.generate(prompt, force_local=True)
+        raw_response = llm_router.generate(prompt, force_local=True, api_key=api_key)
     else:
         raw_response = router_instance.generate(prompt)
+
+    # Detect router-level errors
+    if not raw_response or not raw_response.strip() or raw_response.startswith("ERROR:"):
+        raise RuntimeError(raw_response or "LLM returned an empty response. Check that Ollama is running.")
 
     # Clean markdown fences
     text = raw_response.strip()
@@ -232,6 +237,8 @@ Return ONLY this JSON array with exactly {num_questions} items:
             and q.get("options")
             and q["correct"] in q["options"]
         ):
+            # Map key format for app compatibility if needed
+            q["skill_tested"] = q.get("skill", "General")
             validated.append(q)
 
     return validated
@@ -248,7 +255,7 @@ def score_quiz(questions: list, user_answers: dict) -> dict:
     skill_scores = {}
 
     for i, q in enumerate(questions):
-        skill = q.get("skill", "General")
+        skill = q.get("skill_tested", q.get("skill", "General"))
         if skill not in skill_scores:
             skill_scores[skill] = {"correct": 0, "total": 0}
         skill_scores[skill]["total"] += 1
@@ -356,3 +363,98 @@ def get_resources_for_weak_skills(weak_skills: list) -> list:
                 for r in SKILL_RESOURCES[key]:
                     resources.append({"skill": skill, **r})
     return resources
+
+
+def generate_quiz(resume_text: str, num_questions: int = 10,
+                  api_key: str = None, use_ollama: bool = False) -> dict:
+    """
+    Returns:
+      {
+        "questions":      list of MCQ dicts,
+        "needs_ollama":   bool,   # True if user asked >10 but Ollama wasn't used
+        "total_requested": int,
+        "total_generated": int,
+        "error":          str | None
+      }
+    """
+    needs_ollama   = num_questions > GEMINI_CAP and not use_ollama and not api_key
+    actual_generate = num_questions if (use_ollama or api_key) else min(num_questions, GEMINI_CAP)
+    force_local     = use_ollama and num_questions > GEMINI_CAP
+
+    prompt = f"""You are a senior technical interviewer. Generate exactly {actual_generate} \
+multiple choice questions based ONLY on skills and projects in this resume.
+
+Resume:
+{resume_text[:3500]}
+
+RULES:
+- Each question must test practical usage of a tool actually listed in the resume
+- Do NOT ask definitions — ask scenario/debugging/architecture questions
+- Do NOT repeat the same technology twice across questions
+- 4 options per question labeled A, B, C, D with exactly one correct answer
+- Difficulty: 60% intermediate, 40% advanced
+- Cover variety: different tools, different projects
+
+Return ONLY valid JSON. No markdown fences. No preamble. No explanation.
+
+{{
+  "questions": [
+    {{
+      "id": 1,
+      "skill_tested": "FastAPI",
+      "question": "<scenario question>",
+      "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
+      "correct": "B",
+      "explanation": "<why B is correct, referencing the resume context>"
+    }}
+  ]
+}}"""
+
+    try:
+        raw = llm_router.generate(prompt, force_local=force_local, api_key=api_key)
+    except Exception as e:
+        return {
+            "questions": [], "needs_ollama": needs_ollama,
+            "total_requested": num_questions, "total_generated": 0,
+            "error": f"Generation failed: {e}"
+        }
+
+    # Clean markdown fences if model adds them
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw[raw.find("\n") + 1:]
+    if raw.endswith("```"):
+        raw = raw[:raw.rfind("```")]
+
+    # Parse JSON
+    data = None
+    try:
+        data = json.loads(raw.strip())
+    except json.JSONDecodeError:
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+            except:
+                pass
+
+    if not data:
+        return {
+            "questions": [], "needs_ollama": needs_ollama,
+            "total_requested": num_questions, "total_generated": 0,
+            "error": "Could not parse quiz response. Try again."
+        }
+
+    questions = data.get("questions", [])
+    # Align key names just in case
+    for q in questions:
+        if "skill_tested" not in q:
+            q["skill_tested"] = q.get("skill", "General")
+
+    return {
+        "questions":       questions,
+        "needs_ollama":    needs_ollama,
+        "total_requested": num_questions,
+        "total_generated": len(questions),
+        "error":           None
+    }

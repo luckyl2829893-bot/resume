@@ -12,6 +12,10 @@ Steps:
   5. Anti-bot evasion + rate limiting + full audit log
 """
 
+import sys, asyncio
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import asyncio
 import json
 import random
@@ -284,7 +288,7 @@ async def fill_linkedin_easy_apply(
         # Phone number
         phone_field = await page.query_selector('input[id*="phoneNumber"]')
         if phone_field:
-            await phone_field.fill(candidate.get("phone", ""))
+            await human_type(phone_field, candidate.get("phone", ""))
 
         # Resume upload
         file_input = await page.query_selector('input[type="file"]')
@@ -298,7 +302,7 @@ async def fill_linkedin_easy_apply(
             or await page.query_selector('textarea[aria-label*="cover"]')
         )
         if cl_area:
-            await cl_area.fill(cover_letter)
+            await human_type(cl_area, cover_letter)
 
         # Handle "Why do you want to work here?" style open-text fields
         why_fields = await page.query_selector_all("textarea")
@@ -313,7 +317,7 @@ async def fill_linkedin_easy_apply(
                     f"\nResume snippet: {candidate.get('resume_snippet', '')}",
                     force_local=True,
                 )
-                await field.fill(answer)
+                await human_type(field, answer)
 
         # Screenshot before final action
         safe_name = (
@@ -415,7 +419,7 @@ async def fill_internshala_apply(
         # Cover letter on Internshala
         cl_area = await page.query_selector("textarea#cover_letter_text, textarea.cover-letter")
         if cl_area:
-            await cl_area.fill(cover_letter[:500])  # Internshala has char limits
+            await human_type(cl_area, cover_letter[:500])  # Internshala has char limits
 
         safe_name = (
             f"internshala_{candidate['company']}_{candidate['role']}"
@@ -441,6 +445,67 @@ async def fill_internshala_apply(
 
 
 # ─── STEP 5: Orchestration ────────────────────────────────────────────────────
+
+async def create_stealth_context(pw):
+    """
+    Launches Chromium with anti-bot fingerprint spoofing.
+    Hides webdriver flag, spoofs plugins, sets realistic locale/timezone.
+    """
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-infobars",
+            "--window-size=1366,768",
+        ]
+    )
+    ctx = await browser.new_context(
+        user_agent=random.choice(USER_AGENTS),
+        viewport={"width": 1366, "height": 768},
+        locale="en-IN",
+        timezone_id="Asia/Kolkata",
+        extra_http_headers={
+            "Accept-Language":  "en-IN,en;q=0.9,hi;q=0.8",
+            "Accept-Encoding":  "gzip, deflate, br",
+            "Accept":           "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Connection":       "keep-alive",
+        }
+    )
+    await ctx.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-IN','en','hi'] });
+        window.chrome = { runtime:{}, loadTimes:function(){}, csi:function(){}, app:{} };
+        const _pq = window.navigator.permissions.query.bind(navigator.permissions);
+        window.navigator.permissions.query = p =>
+            p.name === 'notifications'
+                ? Promise.resolve({ state: Notification.permission })
+                : _pq(p);
+    """)
+    return browser, ctx
+
+
+async def human_type(element, text: str):
+    """Types text with random per-character delays (50-150ms) to mimic human input."""
+    await element.click()
+    await asyncio.sleep(random.uniform(0.3, 0.7))
+    for char in text:
+        await element.type(char, delay=random.randint(50, 150))
+        if random.random() < 0.05:            # occasional hesitation
+            await asyncio.sleep(random.uniform(0.3, 0.9))
+
+
+async def human_scroll(page, direction: str = "down", steps: int = None):
+    """Scrolls page in human-like increments before interacting."""
+    steps = steps or random.randint(2, 5)
+    for _ in range(steps):
+        amt = random.randint(200, 500) * (1 if direction == "down" else -1)
+        await page.evaluate(f"window.scrollBy(0, {amt})")
+        await asyncio.sleep(random.uniform(0.4, 1.1))
+
 
 async def run_agent(
     config: dict,
@@ -471,14 +536,7 @@ async def run_agent(
     )
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        ctx = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={
-                "width": random.randint(1200, 1440),
-                "height": random.randint(700, 900),
-            },
-        )
+        browser, ctx = await create_stealth_context(pw)
         page = await ctx.new_page()
 
         # ── Phase 1: Discovery ───────────────────────────────────────────────

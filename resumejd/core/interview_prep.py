@@ -56,7 +56,7 @@ Job Description Metadata:
 Ensure the output is 100% valid JSON and does not contain markdown code fences.
 """
 
-def generate_prep(resume_text: str, jd_dict: dict) -> dict:
+def generate_prep(resume_text: str, jd_dict: dict, api_key: str = None) -> dict:
     """
     Generates a role-specific, comprehensive interview preparation kit.
     """
@@ -72,7 +72,7 @@ def generate_prep(resume_text: str, jd_dict: dict) -> dict:
         jd_json=json.dumps(jd_dict)
     )
     
-    raw_response = llm_router.generate(prompt, force_local=True)
+    raw_response = llm_router.generate(prompt, force_local=True, api_key=api_key)
     
     # Extract JSON robustly from conversational preambles/postambles
     json_str = ""
@@ -120,7 +120,7 @@ def generate_prep(resume_text: str, jd_dict: dict) -> dict:
         }
 
 def generate_deep_project_drill(resume_text: str, project_name: str, 
-                                 model_source: str) -> dict:
+                                 model_source: str, api_key: str = None) -> dict:
     """
     Generates hyper-specific technical Q&A for a given project.
     ONLY runs when model_source == 'ollama'. Returns empty dict otherwise.
@@ -132,7 +132,7 @@ def generate_deep_project_drill(resume_text: str, project_name: str,
 You are a senior staff engineer conducting a brutal technical interview.
 The candidate claims to have built this project: {project_name}
 Here is their full resume context: {resume_text}
-
+ 
 Generate a deep technical drill in STRICT JSON format with these exact keys:
 {{
   "architecture": [
@@ -169,7 +169,7 @@ Rules:
 - Return ONLY valid JSON. No preamble. No markdown code fences. No explanation.
 """
     
-    raw = llm_router.generate(base_prompt, force_local=True)
+    raw = llm_router.generate(base_prompt, force_local=True, api_key=api_key)
 
     return _parse_drill_json(raw)
 

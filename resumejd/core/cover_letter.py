@@ -27,7 +27,7 @@ STRUCTURE REQUIREMENTS:
 Output ONLY the cover letter text, with no extra placeholders, explanations, or metadata.
 """
 
-def generate(resume_text: str, jd_raw: str, company_name: str) -> str:
+def generate(resume_text: str, jd_raw: str, company_name: str, api_key: str = None) -> str:
     """
     Generates a high-precision, 3-paragraph tailored cover letter using llm_router.
     """
@@ -36,4 +36,4 @@ def generate(resume_text: str, jd_raw: str, company_name: str) -> str:
         jd_raw=jd_raw,
         resume_text=resume_text
     )
-    return llm_router.generate(prompt)
+    return llm_router.generate(prompt, api_key=api_key)

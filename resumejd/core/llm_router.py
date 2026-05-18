@@ -32,92 +32,100 @@ def get_last_model_used() -> dict:
     return {"model": _last_model_used, "label": _last_model_label}
 
 
-def generate(prompt: str, force_local: bool = False, force_gemini: bool = False) -> str:
+def generate(prompt: str, force_local: bool = False,
+             force_gemini: bool = False, api_key: str = None) -> str:
     """
-    Routes prompt to the appropriate LLM.
-
-    Priority logic:
-      force_gemini=True  → always use Gemini (error if no key)
-      force_local=True   → always use Ollama
-      neither            → try Gemini first, fall back to Ollama on any error
-
-    Sets _last_model_used so the UI can display which model ran.
-    Returns the string text output.
+    Unified LLM router.
+    Priority order when neither force flag is set:
+      1. Gemini (fast, use for short tasks)
+      2. Ollama fallback on 429 / missing key / any exception
+    api_key overrides .env GEMINI_API_KEY if provided.
     """
     global _last_model_used, _last_model_label
 
-    gemini_key = os.getenv("GEMINI_API_KEY")
-
-    if force_gemini and gemini_key:
-        result = _generate_gemini(prompt, gemini_key)
-        if result is not None:
-            return result
-        _last_model_used = "gemini_failed"
-        _last_model_label = "Gemini FAILED — check key/quota"
-        return "ERROR: Gemini request failed. Check your API key and quota."
-
-    if force_local or not gemini_key:
+    # Force local → skip Gemini entirely
+    if force_local and not force_gemini:
         _last_model_used = "ollama"
         _last_model_label = f"Ollama ({OLLAMA_MODEL})"
-        return _generate_ollama(prompt)
+        return _call_ollama(prompt)
 
-    # Auto mode: try Gemini, fall back to Ollama
-    result = _generate_gemini(prompt, gemini_key)
-    if result is not None:
-        return result
-
-    print(f"[LLM Router] Gemini failed. Falling back to local Ollama ({OLLAMA_MODEL})...")
-    _last_model_used = "ollama_fallback"
-    _last_model_label = f"Ollama fallback ({OLLAMA_MODEL})"
-    return _generate_ollama(prompt)
-
-
-def _generate_gemini(prompt: str, api_key: str) -> str | None:
-    """Calls Gemini using the new google-genai SDK. Returns text on success, None on failure."""
-    global _last_model_used, _last_model_label
-    try:
-        if _USE_NEW_SDK:
-            client = _genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=_genai_types.GenerateContentConfig(temperature=0.3),
-            )
+    # Try Gemini first
+    if not force_local:
+        try:
+            res = _call_gemini(prompt, api_key=api_key)
             _last_model_used = "gemini"
             _last_model_label = f"Gemini ({GEMINI_MODEL})"
-            return response.text
-        else:
-            _genai_old.configure(api_key=api_key)
-            model = _genai_old.GenerativeModel(GEMINI_MODEL)
-            response = model.generate_content(prompt)
-            _last_model_used = "gemini"
-            _last_model_label = f"Gemini ({GEMINI_MODEL}) [legacy SDK]"
-            return response.text
-    except Exception as e:
-        print(f"[LLM Router] Gemini error: {e}")
-        return None
+            return res
+        except Exception as e:
+            err_str = str(e).lower()
+            is_rate_limit  = "429" in err_str or "quota" in err_str
+            is_key_missing = "api_key" in err_str or "invalid" in err_str or "no gemini api key" in err_str
+            if is_rate_limit or is_key_missing or not force_gemini:
+                # Fall back to Ollama
+                try:
+                    res = _call_ollama(prompt)
+                    _last_model_used = "ollama_fallback"
+                    _last_model_label = f"Ollama fallback ({OLLAMA_MODEL})"
+                    return res
+                except Exception as ollama_err:
+                    _last_model_used = "all_failed"
+                    _last_model_label = "All models failed"
+                    raise RuntimeError(
+                        f"Both Gemini and Ollama failed.\n"
+                        f"Gemini: {e}\nOllama: {ollama_err}"
+                    )
+            _last_model_used = "gemini_failed"
+            _last_model_label = "Gemini FAILED"
+            raise
+
+    # Auto mode fallback: if force_local was somehow False but we ended up here
+    _last_model_used = "ollama_fallback"
+    _last_model_label = f"Ollama fallback ({OLLAMA_MODEL})"
+    return _call_ollama(prompt)
 
 
-def _generate_ollama(prompt: str) -> str:
+def _call_gemini(prompt: str, api_key: str = None) -> str:
+    """Calls Gemini using google-genai or legacy google.generativeai SDK."""
+    key = api_key or os.getenv("GEMINI_API_KEY", "")
+    if not key:
+        raise ValueError("No Gemini API key available")
+
+    if _USE_NEW_SDK:
+        client = _genai.Client(api_key=key)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=_genai_types.GenerateContentConfig(temperature=0.3),
+        )
+        return response.text
+    else:
+        _genai_old.configure(api_key=key)
+        model = _genai_old.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(prompt)
+        return response.text
+
+
+def _call_ollama(prompt: str) -> str:
     """Executes local inference via Ollama."""
-    global _last_model_used, _last_model_label
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0.3, "num_predict": 2048},
+        "options": {"temperature": 0.3, "num_predict": 3072},
     }
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
-        response.raise_for_status()
-        _last_model_used = "ollama"
-        _last_model_label = f"Ollama ({OLLAMA_MODEL})"
-        return response.json().get("response", "")
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=300)
+        resp.raise_for_status()
+        text = resp.json().get("response", "")
+        if not text or not text.strip():
+            return f"ERROR: Ollama returned an empty response. The model '{OLLAMA_MODEL}' may still be loading."
+        return text
+    except requests.exceptions.ConnectionError:
+        return f"ERROR: Ollama is not running. Start it with 'ollama serve' and ensure model '{OLLAMA_MODEL}' is pulled."
+    except requests.exceptions.Timeout:
+        return f"ERROR: Ollama timed out (300s)."
     except Exception as e:
-        print(f"[LLM Router] Ollama request failed: {e}")
-        _last_model_used = "ollama_error"
-        _last_model_label = "Ollama ERROR"
-        return f"ERROR: Local Ollama is offline or model '{OLLAMA_MODEL}' is missing. Run 'ollama serve'."
+        return f"ERROR: Local Ollama failed: {e}."
 
 
 def check_ollama_status() -> dict:
