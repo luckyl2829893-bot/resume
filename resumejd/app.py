@@ -154,21 +154,12 @@ with st.sidebar:
     with st.expander("⚙️ Settings & MLOps"):
         tab_cfg, tab_mlops = st.tabs(["Config", "MLOps Log"])
         with tab_cfg:
-            st.caption("API Key (.env)")
-            gemini_key_input = st.text_input(
-                "Gemini API Key",
-                value=os.getenv("GEMINI_API_KEY", ""),
-                type="password",
-                label_visibility="collapsed",
-            )
-            if st.button("Save Key"):
-                try:
-                    env_file = Path(__file__).parent / ".env"
-                    with open(env_file, "w") as f:
-                        f.write(f"GEMINI_API_KEY={gemini_key_input}\n")
-                    st.success("Saved! Restart app.")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+            st.caption("Gemini API Key")
+            gemini_key_status = os.getenv("GEMINI_API_KEY", "")
+            if gemini_key_status:
+                st.success("🔐 Gemini API key is configured (loaded from .env or Streamlit Secrets)")
+            else:
+                st.warning("Gemini key not found. Add it to your `.env` file:\n```\nGEMINI_API_KEY=your_key_here\n```\nOr set it in Streamlit Cloud → Settings → Secrets.")
 
             st.caption("Ollama Status")
             if st.button("Ping Ollama"):
@@ -536,19 +527,38 @@ elif page == "\U0001f3a4 Interview Prep":
             with tab_drill:
                 st.caption("Generates hyper-specific Q&A so you can explain every line of your code to a senior engineer.")
 
-                drill_resume = st.session_state.get("resume_text", "") or st.session_state.tailored_resume
+                drill_resume = st.session_state.get("resume_text", "")
                 if not drill_resume:
                     st.warning("Upload your resume on the Tailorer screen first.")
                 else:
                     import re as _re
-                    project_matches = _re.findall(r'##PROJECT:\s*(.+)', drill_resume)
-                    if not project_matches:
-                        # Fallback — look for bold-style project headers in the text
-                        project_matches = _re.findall(
-                            r'\n([A-Z][A-Za-z0-9 :&\-]{10,60})\n', drill_resume
-                        )[:5] or ["My Main Project"]
+                    # Primary: use parsed skills_profile projects if available
+                    project_names = []
+                    if st.session_state.get("skills_profile"):
+                        project_names = [
+                            p.get("name", "")
+                            for p in st.session_state.skills_profile.get("projects", [])
+                            if p.get("name")
+                        ]
+                    # Fallback 1: ##PROJECT: markers in text
+                    if not project_names:
+                        project_names = _re.findall(r"##PROJECT:\s*(.+)", drill_resume)
+                    # Fallback 2: smarter regex (skip common section headers)
+                    if not project_names:
+                        skip_words = {
+                            "EDUCATION", "EXPERIENCE", "SKILLS", "SUMMARY", "PROFILE",
+                            "CONTACT", "OBJECTIVE", "CERTIFICATIONS", "INTERESTS",
+                            "ACHIEVEMENTS", "PROJECTS", "WORK EXPERIENCE", "ABOUT"
+                        }
+                        candidates = _re.findall(
+                            r"\n([A-Z][A-Za-z0-9][A-Za-z0-9 :&\-]{4,50})\n",
+                            drill_resume
+                        )
+                        project_names = [c for c in candidates if c.strip().upper() not in skip_words][:8]
+                    if not project_names:
+                        project_names = ["My Main Project"]
 
-                    selected_project = st.selectbox("Select Project to Drill", project_matches, key="drill_project")
+                    selected_project = st.selectbox("Select Project to Drill", project_names, key="drill_project")
                     quiz_mode = st.toggle("Quiz Me Mode (hide answers until revealed)", value=False, key="quiz_mode")
 
                     if st.button("Generate Deep Drill", type="primary", key="gen_drill"):
@@ -934,40 +944,57 @@ elif page == "🧠 Skill Quiz":
 
     # Setup / Config Phase
     if st.session_state.quiz_state == "setup":
-        quiz_resume = st.file_uploader("Upload your resume to personalize a technical exam", type=["pdf", "docx"], key="quiz_uploader")
+        # Reuse resume already in session if available
+        if st.session_state.resume_text:
+            quiz_text = st.session_state.resume_text
+            st.info(f"📄 Using resume already uploaded in this session ({len(quiz_text)} chars). You can upload a different one below to override.")
+            quiz_resume_override = st.file_uploader("Upload a different resume (optional)", type=["pdf", "docx"], key="quiz_uploader")
+            if quiz_resume_override:
+                quiz_text = parse_resume(quiz_resume_override)
+                st.session_state.resume_text = quiz_text
+                st.success(f"✓ New resume loaded ({len(quiz_text)} chars)")
+        else:
+            quiz_resume = st.file_uploader("Upload your resume to personalize a technical exam", type=["pdf", "docx"], key="quiz_uploader")
+            quiz_text = ""
+            if quiz_resume:
+                quiz_text = parse_resume(quiz_resume)
+                st.session_state.resume_text = quiz_text
 
-        if quiz_resume:
-            quiz_text = parse_resume(quiz_resume)
+        if st.session_state.resume_text:
+            quiz_text = st.session_state.resume_text
 
-            if st.button("📊 Parse Skills Profile", type="primary"):
-                with st.spinner("Deconstructing resume skills and project stacks..."):
+            if st.button("Parse Skills Profile", type="primary"):
+                with st.spinner("Scanning every line of your resume for skills..."):
                     st.session_state.skills_profile = extract_resume_skills(quiz_text)
 
             if st.session_state.skills_profile:
                 profile = st.session_state.skills_profile
                 st.subheader("Skills and Context Identified:")
 
-                flat_skills = (
-                    profile.get("programming_languages", []) +
-                    profile.get("frameworks_libraries", []) +
-                    profile.get("tools_platforms", []) +
-                    profile.get("concepts", [])
-                )
+                # Use all_skills comprehensive list as the primary selector source
+                all_skills = profile.get("all_skills", [])
+                if not all_skills:
+                    all_skills = (
+                        profile.get("programming_languages", []) +
+                        profile.get("frameworks_libraries", []) +
+                        profile.get("tools_platforms", []) +
+                        profile.get("concepts", [])
+                    )
 
                 q_col1, q_col2, q_col3 = st.columns(3)
-                q_col1.metric("Tech Skills", len(flat_skills))
+                q_col1.metric("Total Skills Found", len(all_skills))
                 q_col2.metric("Grounding Projects", len(profile.get("projects", [])))
                 q_col3.metric("Work Contexts", len(profile.get("internships_jobs", [])))
 
                 selected_focus = st.multiselect(
                     "Choose topics to include in this exam:",
-                    options=flat_skills,
-                    default=flat_skills[:5] if len(flat_skills) >= 5 else flat_skills
+                    options=all_skills,
+                    default=all_skills[:6] if len(all_skills) >= 6 else all_skills
                 )
 
                 num_questions = st.slider("Total MCQ Questions", 5, 25, 10)
 
-                if selected_focus and st.button("🚀 Generate Personalized Exam", type="primary"):
+                if selected_focus and st.button("Generate Personalized Exam", type="primary"):
                     with st.spinner("Synthesizing technical scenario questions... (takes 20-35s)"):
                         questions_batch = generate_quiz_batch(profile, selected_focus, num_questions)
 

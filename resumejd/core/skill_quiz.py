@@ -39,22 +39,26 @@ Rules:
 def extract_resume_skills(resume_text: str, router_instance=None) -> dict:
     """
     Parse resume and extract structured skill/project/tool profile.
-    This becomes the grounding for all quiz questions — prevents hallucination.
+    Uses an exhaustive prompt to catch every technical term in the resume,
+    including ones mentioned only in bullet point context.
     """
     prompt = f"""
-Extract all technical skills, tools, frameworks, projects, and technologies
-from this resume. Return ONLY JSON in this format:
+Read this resume carefully — every single line, every bullet point, every project description.
+Extract ALL technical skills, tools, frameworks, libraries, platforms, and technologies you can find.
+Do not skip anything mentioned in passing or in context sentences.
+
+Return ONLY JSON in this exact format (no markdown, no preamble):
 
 {{
-  "programming_languages": ["Python", "JavaScript"],
-  "frameworks_libraries": ["FastAPI", "React", "YOLOv11"],
-  "tools_platforms": ["Git", "Docker", "AWS"],
-  "databases": ["PostgreSQL", "MongoDB"],
-  "concepts": ["REST API", "Machine Learning", "Computer Vision"],
+  "programming_languages": ["Python", "JavaScript", "C++"],
+  "frameworks_libraries": ["FastAPI", "React", "YOLOv11", "Transformers"],
+  "tools_platforms": ["Git", "Docker", "AWS", "VS Code", "Postman"],
+  "databases": ["PostgreSQL", "MongoDB", "SQLite", "Redis"],
+  "concepts": ["REST API", "Machine Learning", "Computer Vision", "CI/CD"],
   "projects": [
     {{
       "name": "Project Name",
-      "tech_stack": ["Python", "FastAPI"],
+      "tech_stack": ["Python", "FastAPI", "MongoDB"],
       "description": "one line of what it does",
       "key_features": ["feature 1", "feature 2"]
     }}
@@ -63,15 +67,24 @@ from this resume. Return ONLY JSON in this format:
     {{
       "role": "ML Engineer Intern",
       "company": "Company Name",
-      "tech_used": ["Python", "TensorFlow"],
-      "key_work": "brief description"
+      "tech_used": ["Python", "TensorFlow", "Docker"],
+      "key_work": "brief description of what was built or done"
     }}
   ],
   "domain_expertise": ["Computer Vision", "NLP", "Web Development"],
-  "certifications": ["cert name"]
+  "certifications": ["AWS Certified Developer", "TensorFlow Certificate"],
+  "all_skills": ["Python", "FastAPI", "Docker", "MongoDB", "REST API", "YOLOv11"]
 }}
 
-Resume text:
+CRITICAL RULES:
+- The "all_skills" field must be a COMPLETE flat list of every distinct technical skill, tool,
+  framework, library, platform, and concept you find ANYWHERE in the resume.
+  This includes skills mentioned only once in a bullet point sentence.
+- Do NOT skip tools mentioned in project descriptions, job duties, or achievement bullets.
+- Include version numbers if mentioned (e.g. "YOLOv8", "Python 3.11", "Node.js 18").
+- The goal is TOTAL COVERAGE — it is better to include too many than to miss any.
+
+Resume text to analyze:
 {resume_text}
 """
     if router_instance is None:
@@ -88,7 +101,15 @@ Resume text:
     text = text.strip()
 
     try:
-        return json.loads(text)
+        result = json.loads(text)
+        # Ensure all_skills is always present and populated
+        if "all_skills" not in result or not result["all_skills"]:
+            all_s = set()
+            for key in ["programming_languages", "frameworks_libraries", "tools_platforms",
+                        "databases", "concepts", "domain_expertise"]:
+                all_s.update(result.get(key, []))
+            result["all_skills"] = sorted(all_s)
+        return result
     except Exception as e:
         print(f"[Quiz Engine] Failed to parse skills JSON: {e}")
         # Fallback profile
@@ -102,6 +123,7 @@ Resume text:
             "internships_jobs": [],
             "domain_expertise": [],
             "certifications": [],
+            "all_skills": ["Python", "Flask", "Git", "SQLite"],
         }
 
 
