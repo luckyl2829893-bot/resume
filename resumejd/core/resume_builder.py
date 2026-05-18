@@ -188,26 +188,15 @@ def build_pdf(tailored_text: str, filename: str = "resume.pdf", layout_profile: 
         pdf.cell(0, 5, clean_pdf_text(contact_text), align="C", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(4)
         
-    # Render sections according to the exact extracted section order
-    for sec_name in layout_profile.get("section_order", []):
-        parsed_sec_key = None
-        for key in parsed["sections"].keys():
-            if sec_name.upper() in key or key in sec_name.upper():
-                parsed_sec_key = key
-                break
-                
-        if not parsed_sec_key:
-            continue
-            
-        content = parsed["sections"][parsed_sec_key]
-        if not content:
-            continue
-            
+    rendered_keys = set()
+    
+    # Helper to render a single section in PDF
+    def render_pdf_sec(sec_title, sec_content):
         # Draw Section Header
         pdf.ln(3)
         pdf.set_text_color(accent_r, accent_g, accent_b)
         pdf.set_font("Helvetica", "B", layout_profile.get("heading_font_size", 11))
-        pdf.cell(0, 6, sec_name.upper(), new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, sec_title.upper(), new_x="LMARGIN", new_y="NEXT")
         
         # Horizontal accent rule
         pdf.set_draw_color(accent_r, accent_g, accent_b)
@@ -217,7 +206,7 @@ def build_pdf(tailored_text: str, filename: str = "resume.pdf", layout_profile: 
         
         # Render Section Content Body
         pdf.set_text_color(30, 30, 30)
-        lines = content.split("\n")
+        lines = sec_content.split("\n")
         
         for line in lines:
             line_clean = clean_pdf_text(line.strip())
@@ -257,6 +246,26 @@ def build_pdf(tailored_text: str, filename: str = "resume.pdf", layout_profile: 
                 pdf.ln(4.5)
                 
         pdf.ln(1.5)
+
+    # 1. Render sections in section_order first
+    for sec_name in layout_profile.get("section_order", []):
+        parsed_sec_key = None
+        for key in parsed["sections"].keys():
+            if key not in rendered_keys and (sec_name.upper() in key or key in sec_name.upper()):
+                parsed_sec_key = key
+                break
+                
+        if parsed_sec_key:
+            content = parsed["sections"][parsed_sec_key]
+            if content:
+                render_pdf_sec(parsed_sec_key, content)
+                rendered_keys.add(parsed_sec_key)
+
+    # 2. Render any remaining sections that were not matched by section_order
+    for key, content in parsed["sections"].items():
+        if key not in rendered_keys and content:
+            render_pdf_sec(key, content)
+            rendered_keys.add(key)
         
     return bytes(pdf.output())
 
@@ -314,27 +323,17 @@ def build_docx(tailored_text: str, filename: str = "resume.docx", layout_profile
         run_contact.font.name = "Calibri"
         run_contact.font.color.rgb = RGBColor(80, 80, 80)
         
-    for sec_name in layout_profile.get("section_order", []):
-        parsed_sec_key = None
-        for key in parsed["sections"].keys():
-            if sec_name.upper() in key or key in sec_name.upper():
-                parsed_sec_key = key
-                break
-                
-        if not parsed_sec_key:
-            continue
-            
-        content = parsed["sections"][parsed_sec_key]
-        if not content:
-            continue
-            
+    rendered_keys = set()
+    
+    # Helper to render a single section in DOCX
+    def render_docx_sec(sec_title, sec_content):
         # Section Header Paragraph
         p_head = doc.add_paragraph()
         p_head.paragraph_format.space_before = Pt(12)
         p_head.paragraph_format.space_after = Pt(3)
         p_head.paragraph_format.keep_with_next = True
         
-        run_head = p_head.add_run(sec_name.upper())
+        run_head = p_head.add_run(sec_title.upper())
         run_head.bold = True
         run_head.font.size = Pt(layout_profile.get("heading_font_size", 11))
         run_head.font.name = "Calibri"
@@ -352,7 +351,7 @@ def build_docx(tailored_text: str, filename: str = "resume.docx", layout_profile
         pPr.append(pBdr)
         
         # Render Section Content lines
-        lines = content.split("\n")
+        lines = sec_content.split("\n")
         for line in lines:
             line_clean = line.strip()
             if not line_clean:
@@ -395,7 +394,27 @@ def build_docx(tailored_text: str, filename: str = "resume.docx", layout_profile
                     run.bold = True
                 else:
                     run.bold = False
-                    
+
+    # 1. Render sections in section_order first
+    for sec_name in layout_profile.get("section_order", []):
+        parsed_sec_key = None
+        for key in parsed["sections"].keys():
+            if key not in rendered_keys and (sec_name.upper() in key or key in sec_name.upper()):
+                parsed_sec_key = key
+                break
+                
+        if parsed_sec_key:
+            content = parsed["sections"][parsed_sec_key]
+            if content:
+                render_docx_sec(parsed_sec_key, content)
+                rendered_keys.add(parsed_sec_key)
+
+    # 2. Render any remaining sections that were not matched by section_order
+    for key, content in parsed["sections"].items():
+        if key not in rendered_keys and content:
+            render_docx_sec(key, content)
+            rendered_keys.add(key)
+                     
     buffer = io.BytesIO()
     doc.save(buffer)
     return buffer.getvalue()

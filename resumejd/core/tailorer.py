@@ -108,12 +108,13 @@ def tailor(resume_text: str, jd_dict: dict, jd_raw: str,
 ABSOLUTE FREEZE — do NOT change ANY of these:
 - Candidate name and all contact details (email, phone, LinkedIn, GitHub)
 - University name, degree title, graduation year
+- All company names, employer names, job titles, and dates of employment (MUST KEEP EXACTLY AS WRITTEN)
 - All project names (keep exactly as written)
-- All GitHub links
-- Do NOT invent metrics, tools, or experiences not in the original
+- All GitHub links and URLs (keep exactly as written)
+- Do NOT invent metrics, tools, or experiences not in the original resume
 
 DO:
-- Rewrite bullet points using: "Accomplished [X], measured by [Y], by doing [Z]"
+- Rewrite experience and project bullet points using: "Accomplished [X], measured by [Y], by doing [Z]"
 - Naturally weave in missing keywords
 - Reorder skills section so JD-matching skills appear first
 - Use action verbs from the JD where they fit
@@ -130,19 +131,27 @@ Job description target:
 Return the COMPLETE rewritten resume in this EXACT format — nothing else:
 NAME: <full name>
 CONTACT: <phone> | <email> | <linkedin> | <github>
+
 ---SECTION: PROFILE SUMMARY---
-<2-3 sentence summary>
+<2-3 sentence professional summary tailored to the job description>
+
+---SECTION: EXPERIENCE---
+<company name> | <job title> | <dates>
+• Accomplished X, measured by Y, by doing Z
+• bullet 2
+
 ---SECTION: PROFESSIONAL SKILL---
 • Category: skill1, skill2
+
 ---SECTION: EDUCATION---
 <institution> | <degree> | <years>
+
 ---SECTION: PROJECTS---
 ##PROJECT: <exact original project name>
 • Accomplished X, measured by Y, by doing Z
 • bullet 2
 LINK - <original github link>
-##PROJECT: <next project>
-...
+
 ---SECTION: INTERESTS---
 • Interest 1  • Interest 2
 """
