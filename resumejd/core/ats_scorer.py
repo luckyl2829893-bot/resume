@@ -1,10 +1,18 @@
 import re
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Pre-load sentence transformer layout similarity model (MiniLM-L6) on CPU
-# Ensures fast computation without memory conflicts with Ollama/YOLO GPU schedulers
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# Try loading premium neural SentenceTransformers for local high-fidelity executions
+HAS_SENTENCE_TRANSFORMERS = False
+model = None
+
+try:
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    HAS_SENTENCE_TRANSFORMERS = True
+    print("[ATS Scorer] High-fidelity Neural SentenceTransformer loaded successfully.")
+except Exception as e:
+    print(f"[ATS Scorer] Premium neural engine unavailable ({e}). Gracefully routing to TF-IDF.")
 
 def score(resume_text: str, jd_dict: dict) -> dict:
     """
@@ -14,7 +22,7 @@ def score(resume_text: str, jd_dict: dict) -> dict:
     Weights Breakdown:
     * 35% — exact critical keyword match rate
     * 25% — required skills coverage
-    * 20% — MiniLM semantic cosine similarity (all-MiniLM-L6-v2)
+    * 20% — Hybrid Semantic Cosine Similarity (MiniLM locally, TF-IDF fallback on Cloud)
     * 10% — section presence check (experience, education, skills, projects)
     * 10% — metric/number density in bullets
     """
@@ -56,10 +64,8 @@ def score(resume_text: str, jd_dict: dict) -> dict:
         
     skills_score = skills_match_rate * 100
     
-    # 3. MiniLM Semantic Cosine Similarity (20%)
+    # 3. Hybrid Semantic Cosine Similarity (20%)
     try:
-        resume_emb = model.encode([resume_text[:2500]]) # bound characters for CPU speed
-        
         # Aggregate structural job descriptors for comparison context
         jd_summary = " ".join(
             jd_dict.get("keywords_critical", []) + 
@@ -69,10 +75,17 @@ def score(resume_text: str, jd_dict: dict) -> dict:
         if not jd_summary.strip():
             jd_summary = "General role description matching corporate requirements."
             
-        jd_emb = model.encode([jd_summary])
+        if HAS_SENTENCE_TRANSFORMERS and model is not None:
+            # Local premium neural matching
+            resume_emb = model.encode([resume_text[:2500]])
+            jd_emb = model.encode([jd_summary])
+            semantic_sim = float(cosine_similarity(resume_emb, jd_emb)[0][0])
+        else:
+            # Fast, stable TF-IDF matching (Cloud / fallback)
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf = vectorizer.fit_transform([resume_text[:3500], jd_summary])
+            semantic_sim = float(cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0])
         
-        # Scikit-learn cosine similarity matrices dot-product
-        semantic_sim = float(cosine_similarity(resume_emb, jd_emb)[0][0])
         semantic_score = max(0.0, semantic_sim) * 100
     except Exception as e:
         print(f"[ATS Scorer] Cosine similarity failed: {e}")
