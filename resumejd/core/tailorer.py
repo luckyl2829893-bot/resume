@@ -88,22 +88,18 @@ def tailor(resume_text: str, jd_dict: dict, jd_raw: str,
         section_order = layout_profile["section_order"]
         section_order_instruction = ", ".join(section_order)
 
-    for attempt in range(3):
+    for attempt in range(2):
         if attempt == 0:
             focus = (
                 "First pass: rewrite bullets into X-Y-Z formula and inject "
-                f"these missing keywords naturally: {missing_keywords[:12]}"
-            )
-        elif attempt == 1:
-            focus = (
-                f"Second pass: previous attempt scored {best_score}%. "
-                f"Focus harder on integrating: {missing_keywords[:10]}. "
-                f"Also include these skills: {missing_skills[:8]}"
+                f"these missing keywords naturally: {missing_keywords[:15]}. "
+                f"Also include these skills: {missing_skills[:10]}"
             )
         else:
             focus = (
-                f"Final pass: still at {best_score}%. Be more aggressive with "
-                f"alignment while staying truthful. Remaining gaps: {missing_keywords[:8]}"
+                f"Second pass: previous attempt scored {best_score}%. "
+                f"Focus harder on integrating remaining keywords: {missing_keywords[:10]} "
+                f"and skills: {missing_skills[:8]} while staying truthful."
             )
 
         prompt = f"""You are an expert resume writer and ATS optimization specialist.
@@ -167,8 +163,8 @@ LINK - <original github link>
         missing_keywords = candidate_result.get("missing_keywords", [])
         missing_skills   = candidate_result.get("missing_skills",   [])
 
-        if best_score >= target_score:
-            break   # target reached early
+        if best_score >= target_score or best_score >= original_score + 3:
+            break   # target reached or significant improvement achieved early
 
     # DOWNGRADE PROTECTION: if every rewrite was worse, return original
     if best_score < original_score:
