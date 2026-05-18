@@ -108,17 +108,17 @@ def tailor(resume_text: str, jd_dict: dict, jd_raw: str,
 ABSOLUTE FREEZE — do NOT change ANY of these:
 - Candidate name and all contact details (email, phone, LinkedIn, GitHub)
 - University name, degree title, graduation year
-- All company names, employer names, job titles, and dates of employment (MUST KEEP EXACTLY AS WRITTEN)
-- All project names (keep exactly as written)
-- All GitHub links and URLs (keep exactly as written)
-- Do NOT invent metrics, tools, or experiences not in the original resume
+- All company names, employer names, job titles, and dates of employment (MUST KEEP EXACTLY AS-IS)
+- All project names (keep exactly as-is)
+- All GitHub links and URLs (keep exactly as-is)
+- Keep all facts, numbers, dates, and experiences exactly as-is — do NOT invent experience.
 
-DO:
-- Rewrite experience and project bullet points using: "Accomplished [X], measured by [Y], by doing [Z]"
-- Naturally weave in missing keywords
-- Reorder skills section so JD-matching skills appear first
-- Use action verbs from the JD where they fit
-- If a section is already strong — tighten phrasing only, do not remove content
+DO ONLY:
+1. Mirror keywords and phrases from the JD in the Profile Summary and Experience/Project bullet points naturally (using the X-Y-Z formula: "Accomplished [X], measured by [Y], by doing [Z]").
+2. Reorder skills to match what the JD prioritizes.
+3. Only add matching technologies from the JD that are genuinely present or related to the original resume.
+- Use action verbs from the JD where they fit.
+- If a section is already strong — tighten phrasing only, do not remove content.
 
 CRITICAL: Output sections in EXACTLY this order: {section_order_instruction}
 
